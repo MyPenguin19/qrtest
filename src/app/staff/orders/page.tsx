@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { DiningTableCard } from "@/components/staff/dining-table-card";
+import { getDiningTables } from "@/lib/dining-tables";
 
 import { AutoRefresh } from "@/components/auto-refresh";
 import { KitchenOrderCard } from "@/components/staff/kitchen-order-card";
@@ -24,7 +26,7 @@ export default async function StaffOrdersPage() {
     query = query.eq("branch_id", session.branchId);
   }
 
-  const { data: orders } = await query;
+  const [{data:orders},tables] = await Promise.all([query,getDiningTables(session.restaurantId,session.branchId)]);
 
   return (
     <div className="flex min-h-screen flex-col gap-6 bg-muted/20 p-6">
@@ -48,6 +50,9 @@ export default async function StaffOrdersPage() {
         <Link href="/staff/cashier" className="text-sm underline">Bills and payments</Link>
       )}
 
+      <h2 className="text-lg font-semibold">Tables</h2>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{tables.map(table=><DiningTableCard key={table.id} table={table} canPay={session.role === "cashier"}/>)}</div>
+      <h2 className="text-lg font-semibold">Orders</h2>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {(orders ?? []).map((order) => (
           <KitchenOrderCard

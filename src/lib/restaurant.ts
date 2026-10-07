@@ -37,6 +37,8 @@ export async function requireCurrentRestaurant(): Promise<CurrentRestaurant> {
     redirect("/onboarding");
   }
 
+  if (!["owner", "manager"].includes(membership.role)) redirect("/staff");
+
   const restaurant = membership.restaurants as unknown as {
     id: string;
     name: string;

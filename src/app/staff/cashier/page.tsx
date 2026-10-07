@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { DiningTableCard } from "@/components/staff/dining-table-card";
+import { getDiningTables } from "@/lib/dining-tables";
 
 import QRCode from "qrcode";
 
@@ -13,6 +15,7 @@ import { buildUpiUri } from "@/lib/upi";
 export default async function CashierPage() {
   const session = await requireStaffSession("cashier");
   const admin = createAdminClient();
+  const tables = await getDiningTables(session.restaurantId,session.branchId);
 
   let query = admin
     .from("bills")
@@ -71,6 +74,7 @@ export default async function CashierPage() {
         </form>
       </div>
 
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{tables.filter(t=>t.sessionId).map(table=><DiningTableCard key={table.id} table={table} canPay/>)}</div>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((bill) => (
           <BillCard key={bill.id} bill={bill} />

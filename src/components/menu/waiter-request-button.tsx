@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useSearchParams } from "next/navigation";
 import { Bell } from "lucide-react";
 
 import { requestWaiterAssistance } from "@/app/actions/waiter-requests";
@@ -16,13 +17,18 @@ const OPTIONS = [
 ];
 
 export function WaiterRequestButton({ branchId, tableId }: { branchId: string; tableId: string }) {
+  const token = useSearchParams().get("session") ?? undefined;
+  const [error,setError] = useState<string|null>(null);
   const [open, setOpen] = useState(false);
   const [sent, setSent] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   function send(type: string) {
+    setError(null);
     startTransition(async () => {
-      const result = await requestWaiterAssistance(branchId, tableId, type);
+      try {
+      const result = await requestWaiterAssistance(branchId, tableId, type, token);
+      if(result.error) setError(result.error);
       if (!result.error) {
         setSent(type);
         setTimeout(() => {
@@ -30,13 +36,14 @@ export function WaiterRequestButton({ branchId, tableId }: { branchId: string; t
           setSent(null);
         }, 1200);
       }
+      } catch {setError("Could not send your request. Please try again.");}
     });
   }
 
   return (
     <>
       <div className="fixed bottom-24 right-4 z-40">
-        <Button variant="outline" size="icon" className="size-12 rounded-full shadow-lg" onClick={() => setOpen(true)}>
+        <Button variant="outline" size="icon" aria-label="Request staff assistance" className="size-12 rounded-full shadow-lg" onClick={() => setOpen(true)}>
           <Bell className="size-5" />
         </Button>
       </div>
@@ -45,6 +52,7 @@ export function WaiterRequestButton({ branchId, tableId }: { branchId: string; t
           <DialogHeader>
             <DialogTitle>Need something?</DialogTitle>
           </DialogHeader>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           {sent ? (
             <p className="text-sm text-brand">Request sent — staff have been notified.</p>
           ) : (

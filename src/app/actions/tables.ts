@@ -18,8 +18,11 @@ export async function addTable(
     return { error: "Branch and table label are required." };
   }
 
-  await requireCurrentRestaurant();
+  const restaurant = await requireCurrentRestaurant();
   const supabase = await createClient();
+
+  const {data: branch} = await supabase.from("branches").select("id").eq("id",branchId).eq("restaurant_id",restaurant.restaurantId).maybeSingle();
+  if(!branch) return {error:"Branch not found."};
 
   const { error } = await supabase.from("restaurant_tables").insert({ branch_id: branchId, label });
 

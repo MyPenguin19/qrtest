@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { QrCode, Wallet } from "lucide-react";
+import { useState } from "react";
+import { QrCode } from "lucide-react";
 
-import { markBillPaid } from "@/app/actions/staff-ops";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -26,7 +25,6 @@ const METHODS = [
 export function BillCard({ bill }: { bill: Bill }) {
   const [method, setMethod] = useState<(typeof METHODS)[number]["value"]>("cash");
   const [showQr, setShowQr] = useState(false);
-  const [isPending, startTransition] = useTransition();
 
   return (
     <>
@@ -66,13 +64,7 @@ export function BillCard({ bill }: { bill: Bill }) {
             )
           ) : null}
 
-          <Button
-            disabled={isPending}
-            onClick={() => startTransition(() => markBillPaid(bill.id, method))}
-          >
-            <Wallet className="size-4" />
-            {isPending ? "Saving…" : `Mark paid · ${METHODS.find((m) => m.value === method)?.label}`}
-          </Button>
+          <p className="text-xs text-muted-foreground">Use the table controls above to start payment, confirm receipt, and close the table.</p>
         </CardContent>
       </Card>
 

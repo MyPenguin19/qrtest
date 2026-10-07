@@ -11,6 +11,7 @@ export async function requestWaiterAssistance(
   branchId: string,
   tableId: string,
   type: string,
+  token?: string,
 ): Promise<{ error: string | null }> {
   if (!VALID_TYPES.includes(type)) {
     return { error: "Invalid request type." };
@@ -23,16 +24,20 @@ export async function requestWaiterAssistance(
     .select("id, branches(restaurant_id)")
     .eq("id", tableId)
     .eq("branch_id", branchId)
+    .eq("is_active", true)
     .maybeSingle();
 
   if (!table) {
     return { error: "Table not found." };
   }
 
+  const restaurantId = (table.branches as unknown as {restaurant_id:string}).restaurant_id;
+  const session = token ? await validateCustomerTab(admin, token, {restaurantId, branchId, tableId}) : null;
+  if(!session) return {error:"This visit has ended. Please open your current table menu."};
+
   if (type === "bill") {
-    const result = await raiseBillForTable(admin, branchId, tableId,
-      (table.branches as unknown as { restaurant_id: string }).restaurant_id);
-    if (result.error || !result.notify) return {error: result.error};
+    return raiseBillForTable(admin, branchId, tableId,
+      restaurantId, session.id);
   }
   const { error } = await admin.from("waiter_requests").insert({ branch_id: branchId, table_id: tableId, type });
   return { error: error?.message ?? null };
@@ -44,9 +49,5 @@ export async function requestTabBill(restaurantSlug: string, branchSlug: string,
   const admin = createAdminClient();
   const session = await validateCustomerTab(admin, token, context.identity);
   if (!session) return {error: "This tab is no longer active or does not match this table."};
-  const result = await raiseBillForTable(admin, context.branch.id, tableId, context.restaurant.id, session.id);
-  if (!result.error && result.notify) {
-    await admin.from("waiter_requests").insert({branch_id: context.branch.id, table_id: tableId, type: "bill"});
-  }
-  return {error: result.error};
+  return raiseBillForTable(admin, context.branch.id, tableId, context.restaurant.id, session.id);
 }

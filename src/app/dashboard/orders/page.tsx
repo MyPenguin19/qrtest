@@ -10,7 +10,7 @@ export default async function OrdersPage() {
 
   const { data: orders } = await supabase
     .from("orders")
-    .select("id, order_number, status, total_amount, created_at, branches(name)")
+    .select("id, order_number, status, total_amount, created_at, branches(name), table_sessions(status, restaurant_tables(label))")
     .eq("restaurant_id", restaurant.restaurantId)
     .order("created_at", { ascending: false })
     .limit(50);
@@ -32,6 +32,7 @@ export default async function OrdersPage() {
             <div key={order.id} className="flex items-center justify-between border-b py-2 last:border-0">
               <div>
                 <p className="font-medium">Order #{order.order_number}</p>
+                {order.table_sessions && <p className="text-xs text-muted-foreground">Table {(order.table_sessions as unknown as {restaurant_tables:{label:string}}).restaurant_tables.label} · {(order.table_sessions as unknown as {status:string}).status.replaceAll("_", " ")}</p>}
                 <p className="text-xs text-muted-foreground">
                   {(order.branches as unknown as { name: string } | null)?.name}
                 </p>

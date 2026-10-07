@@ -58,7 +58,7 @@ function harness() {
       }
     }; return query;
   }
-  const client = {from, auth:{getUser:async()=>({data:{user:state.user}})}};
+  const client = {from, rpc:async(name,args)=>{assert.equal(name,'dining_refresh_table');const session=db.table_sessions.find(s=>s.id===args.p_session);if(session?.status==='open')db.restaurant_tables.find(t=>t.id===session.table_id).status='occupied';return {error:null};}, auth:{getUser:async()=>({data:{user:state.user}})}};
   const cache = new Map();
   function load(relative) {
     const filename = path.resolve(__dirname,'..',relative);
@@ -69,6 +69,7 @@ function harness() {
       if(id==='next/headers') return {cookies:async()=>({get:n=>jar.has(n)?{value:jar.get(n)}:undefined,set:(n,v)=>jar.set(n,v),delete:n=>jar.delete(n)})};
       if(id==='next/navigation') return {redirect:p=>{throw new Error('REDIRECT '+p);},notFound:()=>{throw new Error('NOT_FOUND');}};
       if(id==='next/cache') return {revalidatePath:p=>state.revalidated.push(p)};
+      if(id==='@/lib/dining-tables') return {getDiningTables:async()=>[]};
       if(id==='@/lib/supabase/admin') return {createAdminClient:()=>client};
       if(id==='@/lib/supabase/server') return {createClient:async()=>client};
       if(id==='next/link'||id.startsWith('@/components/')) return new Proxy({default:'Link'}, {get:(o,k)=>o[k]??String(k)});
@@ -92,7 +93,7 @@ function harness() {
   return {db,state,jar,load,login};
 }
 
-for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates staff, one login, customer order -> Preparing -> Ready -> Served, session stays open`,async()=>{
+for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates staff, one login, seeded order -> Preparing -> Ready -> Served, session stays open`,async()=>{
   const h=harness(), form=new FormData();
   for(const [k,v] of Object.entries({name:'Pat',branchId:'branch-a',role,pin:'1234'})) form.set(k,v);
   assert.equal((await h.load('src/app/actions/staff.ts').addStaff({error:null},form)).error,null);
@@ -100,8 +101,12 @@ for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates s
   const login=new FormData();for(const [k,v] of Object.entries({restaurantSlug:'a',role,pin:'1234'}))login.set(k,v);
   await assert.rejects(h.load('src/app/actions/staff-auth.ts').staffLogin({error:null},login),/REDIRECT \/staff\/orders/);
   const cookie=h.jar.get('thaliq_staff_session');
-  const result=await h.load('src/app/actions/orders.ts').placeOrder({restaurantSlug:'a',branchSlug:'main',tableId:'table-1',customerName:'Guest',customerPhone:'test-phone',lines:[{itemId:'item-1',variantId:null,addonIds:[],quantity:2,specialInstructions:''}]});
-  assert.ok(result.orderId);
+  // Order creation now runs in PostgreSQL; see dining-lifecycle.test.cjs.
+  h.db.table_sessions.push({id:'session',table_id:'table-1',status:'open',closed_at:null});
+  h.db.orders.push({id:'order',restaurant_id:'A',branch_id:'branch-a',table_session_id:'session',status:'pending',total_amount:20});
+  h.db.order_items.push({id:'line',order_id:'order',item_name:'Tea',quantity:2});
+  h.db.order_status_history.push({order_id:'order',status:'pending'});
+  h.db.customers.push({name:'Guest'});
   const order=h.db.orders[0], original=structuredClone(order);
   h.db.bills.push({id:'bill',restaurant_id:'A',table_session_id:order.table_session_id,status:'open',total_amount:20});
   const board=await h.load('src/app/staff/orders/page.tsx').default();
@@ -152,15 +157,10 @@ test('missing, tampered, disabled, or reassigned staff sessions are rejected',as
   h.db.staff[0].is_active=true;h.db.staff[0].branch_id='other';await assert.rejects(guard.requireStaffSession(),/REDIRECT \/staff/);
 });
 
-test('non-cashier staff cannot pay bills; cashier retains existing payment/session closure',async()=>{
-  const h=harness();await h.login('kitchen');const ops=h.load('src/app/actions/staff-ops.ts');
-  h.db.table_sessions.push({id:'session',table_id:'table-1',status:'open'});
-  h.db.orders.push({id:'order',restaurant_id:'A',table_session_id:'session',status:'served'});
-  h.db.bills.push({id:'bill',restaurant_id:'A',table_session_id:'session',total_amount:20,status:'requested'});
-  await assert.rejects(ops.markBillPaid('bill','cash'),/REDIRECT \/staff/);assert.equal(h.db.payments.length,0);
-  await h.login('cashier');await ops.markBillPaid('bill','cash');
-  assert.equal(h.db.bills[0].status,'paid');assert.equal(h.db.payments[0].amount,20);
-  assert.equal(h.db.table_sessions[0].status,'closed');assert.equal(h.db.orders[0].status,'completed');
+test('non-cashier staff cannot confirm payments',async()=>{
+  const h=harness();await h.login('kitchen');
+  await assert.rejects(h.load('src/app/actions/staff-ops.ts').markBillPaid('bill','cash'),/REDIRECT \/staff/);
+  assert.equal(h.db.payments.length,0);
 });
 
 test('staff cookie does not grant owner/admin access; existing owner/admin guards still work',async()=>{
@@ -208,133 +208,9 @@ test('restaurant-wide staff still cannot read or change another restaurant order
 });
 
 
-const tabParams = {restaurant:'a',branch:'main',table:'table-1'};
-const tabPagePath = 'src/app/menu/[restaurant]/[branch]/[table]/tab/page.tsx';
-const menuPagePath = 'src/app/menu/[restaurant]/[branch]/[table]/page.tsx';
-function orderInput(itemId='item-1', token) {
-  return {restaurantSlug:'a',branchSlug:'main',tableId:'table-1',tableSessionToken:token,
-    lines:[{itemId,variantId:null,addonIds:[],quantity:1,specialInstructions:''}]};
-}
-function tokenFrom(result) { assert.ok(result.tabUrl); return new URL(result.tabUrl,'https://test.local').searchParams.get('session'); }
-async function tabView(h,token,params=tabParams) {
-  return h.load(tabPagePath).default({params:Promise.resolve(params),searchParams:Promise.resolve({session:token})});
-}
-
-test('persistent tab: QR menu -> Latte -> Served -> Order More -> Cappuccino -> Served -> one requested bill',async()=>{
-  const h=harness();await h.login('kitchen');
-  Object.assign(h.db.menu_items[0],{name:'Latte',base_price:5});
-  h.db.menu_items.push({...h.db.menu_items[0],id:'item-2',name:'Cappuccino',base_price:7.5});
-  const menu=await h.load(menuPagePath).default({params:Promise.resolve(tabParams),searchParams:Promise.resolve({})});
-  assert.match(JSON.stringify(menu),/table-1/);
-  assert.equal(h.db.table_sessions.length,0);
-  const place=h.load('src/app/actions/orders.ts').placeOrder;
-  const first=await place(orderInput());const token=tokenFrom(first);
-  const tabs=h.load('src/lib/customer-tab.ts'), ops=h.load('src/app/actions/staff-ops.ts');
-  assert.match(JSON.stringify(await tabView(h,token)),/Latte/);
-  assert.match(JSON.stringify(await h.load('src/app/staff/orders/page.tsx').default()),new RegExp(first.orderId));
-  for(const [from,to] of [['pending','preparing'],['preparing','ready'],['ready','served']]) {
-    if(from==='ready') await ops.markOrderServed(first.orderId);else await ops.advanceOrderStatus(first.orderId,from);
-    assert.equal((await tabs.getCustomerTab('a','main','table-1',token)).orders[0].status,to);
-    assert.match(JSON.stringify(await tabView(h,token)),new RegExp('"status":"'+to+'"'));
-  }
-  assert.equal(h.db.table_sessions[0].status,'open');
-  const firstSnapshot=structuredClone(h.db.orders[0]);
-  const view=JSON.stringify(await tabView(h,token));assert.match(view,/Order More/);assert.match(view,/session=/);
-  const moreMenu=await h.load(menuPagePath).default({params:Promise.resolve(tabParams),searchParams:Promise.resolve({session:token})});
-  assert.match(JSON.stringify(moreMenu),/View Your Tab/);
-  const second=await place(orderInput('item-2',token));assert.equal(tokenFrom(second),token);
-  assert.deepEqual(h.db.orders[0],firstSnapshot);
-  assert.equal(h.db.orders[0].table_session_id,h.db.orders[1].table_session_id);
-  assert.equal(h.db.table_sessions.filter(s=>s.status!=='closed').length,1);
-  const tab=await tabs.getCustomerTab('a','main','table-1',token);
-  assert.equal(tab.orders.length,2);assert.equal(tab.total,12.5);
-  const rendered=JSON.stringify(await tabView(h,token));assert.match(rendered,/Latte/);assert.match(rendered,/Cappuccino/);
-  assert.match(JSON.stringify(await h.load('src/app/staff/orders/page.tsx').default()),new RegExp(second.orderId));
-  await ops.advanceOrderStatus(second.orderId,'pending');await ops.advanceOrderStatus(second.orderId,'preparing');await ops.markOrderServed(second.orderId);
-  assert.equal(h.db.table_sessions[0].status,'open');
-  const request=h.load('src/app/actions/waiter-requests.ts').requestTabBill;
-  assert.equal((await request('a','main','table-1',token)).error,null);
-  assert.equal((await request('a','main','table-1',token)).error,null);
-  assert.equal(h.db.bills.length,1);assert.equal(h.db.bills[0].total_amount,12.5);
-  assert.equal(h.db.bills[0].table_session_id,h.db.orders[0].table_session_id);
-  assert.equal(h.db.waiter_requests.length,1);assert.equal(h.db.payments.length,0);
-  assert.equal(h.db.table_sessions[0].status,'bill_requested');
-  assert.match(JSON.stringify(await tabView(h,token)),/"requested":true/);
-});
-
-test('more orders after bill request update the same bill and keep the session active',async()=>{
-  const h=harness(), place=h.load('src/app/actions/orders.ts').placeOrder;
-  const token=tokenFrom(await place(orderInput()));
-  const request=h.load('src/app/actions/waiter-requests.ts').requestTabBill;
-  await request('a','main','table-1',token);const billId=h.db.bills[0].id;
-  await place(orderInput('item-1',token));
-  assert.equal(h.db.bills.length,1);assert.equal(h.db.bills[0].id,billId);assert.equal(h.db.bills[0].total_amount,20);
-  assert.equal(h.db.table_sessions.length,1);assert.equal(h.db.table_sessions[0].status,'bill_requested');
-  assert.equal(h.db.restaurant_tables[0].status,'bill_requested');assert.equal(h.db.waiter_requests.length,1);
-  await h.load('src/app/actions/waiter-requests.ts').requestWaiterAssistance('branch-a','table-1','bill');
-  assert.equal(h.db.bills.length,1);assert.equal(h.db.waiter_requests.length,1);
-});
-
-test('second QR visitor joins the active database session, including after bill request',async()=>{
-  const h=harness(), place=h.load('src/app/actions/orders.ts').placeOrder;
-  const token=tokenFrom(await place(orderInput()));
-  const qr=()=>h.load(menuPagePath).default({params:Promise.resolve(tabParams),searchParams:Promise.resolve({})});
-  await assert.rejects(qr,/REDIRECT \/menu\/a\/main\/table-1\?session=/);
-  await h.load('src/app/actions/waiter-requests.ts').requestTabBill('a','main','table-1',token);
-  await assert.rejects(qr,/REDIRECT/);
-  assert.equal(tokenFrom(await place(orderInput())),token);
-  assert.equal(h.db.table_sessions.length,1);assert.equal(h.db.bills[0].total_amount,20);
-});
-
-test('server totals retain tax/service/discount totals, exclude cancelled orders and foreign rows',async()=>{
-  const h=harness();h.db.restaurants[0].tax_percent=10;h.db.restaurants[0].service_charge_percent=5;
-  const token=tokenFrom(await h.load('src/app/actions/orders.ts').placeOrder(orderInput()));
-  assert.equal(h.db.orders[0].total_amount,11.5);
-  h.db.orders.push({...h.db.orders[0],id:'cancelled',status:'cancelled',total_amount:100});
-  h.db.orders.push({...h.db.orders[0],id:'discounted',total_amount:8.25,discount_amount:2});
-  h.db.orders.push({...h.db.orders[0],id:'foreign',restaurant_id:'B',total_amount:1000});
-  const tab=await h.load('src/lib/customer-tab.ts').getCustomerTab('a','main','table-1',token);
-  assert.equal(tab.total,19.75);assert.equal(tab.orders.length,3);
-  await h.load('src/app/actions/waiter-requests.ts').requestTabBill('a','main','table-1',token);
-  assert.equal(h.db.bills[0].total_amount,19.75);
-});
-
-test('tampered tokens and restaurant/branch/table substitutions cannot read, order, or request bills',async()=>{
-  const h=harness(), place=h.load('src/app/actions/orders.ts').placeOrder;
-  const token=tokenFrom(await place(orderInput()));
-  h.db.branches.push({id:'branch-b',restaurant_id:'B',slug:'main',is_active:true});
-  h.db.restaurant_tables.push({id:'table-2',branch_id:'branch-a',label:'2'},{id:'table-b',branch_id:'branch-b',label:'B'});
-  const requests=h.load('src/app/actions/waiter-requests.ts');
-  for(const [restaurant,branch,table,badToken] of [['a','main','table-1',token+'x'],['a','main','table-2',token],['b','main','table-b',token],['a','other','table-1',token]]) {
-    const before=structuredClone(h.db);
-    await assert.rejects(()=>tabView(h,badToken,{restaurant,branch,table}),/NOT_FOUND/);
-    assert.ok((await requests.requestTabBill(restaurant,branch,table,badToken)).error);
-    assert.ok((await place({...orderInput('item-1',badToken),restaurantSlug:restaurant,branchSlug:branch,tableId:table})).error);
-    assert.deepEqual(h.db,before);
-  }
-});
-
-test('closed tab cannot access or append to a later session at the same table',async()=>{
-  const h=harness(), place=h.load('src/app/actions/orders.ts').placeOrder;
-  const old=tokenFrom(await place(orderInput()));h.db.table_sessions[0].status='closed';
-  const fresh=tokenFrom(await place(orderInput()));assert.notEqual(old,fresh);
-  const before=structuredClone(h.db);
-  assert.ok((await place(orderInput('item-1',old))).error);
-  await assert.rejects(()=>tabView(h,old),/NOT_FOUND/);
-  assert.ok((await h.load('src/app/actions/waiter-requests.ts').requestTabBill('a','main','table-1',old)).error);
-  assert.deepEqual(h.db,before);
-  assert.equal((await h.load('src/lib/customer-tab.ts').getCustomerTab('a','main','table-1',fresh)).orders.length,1);
-});
-
-test('ambiguous active sessions fail closed instead of opening a third session',async()=>{
-  const h=harness();h.db.table_sessions.push({id:'one',table_id:'table-1',status:'open'},{id:'two',table_id:'table-1',status:'bill_requested'});
-  await assert.rejects(h.load('src/app/actions/orders.ts').placeOrder(orderInput()),/Could not identify/);
-  assert.equal(h.db.table_sessions.length,2);assert.equal(h.db.orders.length,0);
-});
-
-test('orders without a table retain individual tracking and do not create a table session',async()=>{
-  const h=harness();
-  const result=await h.load('src/app/actions/orders.ts').placeOrder({...orderInput(),tableId:undefined});
-  assert.ok(result.orderId);assert.equal(result.tabUrl,undefined);
-  assert.equal(h.db.orders[0].table_session_id,null);assert.equal(h.db.table_sessions.length,0);
+test('signed customer references reject forgery and bind restaurant, branch, table and visit',()=>{
+  const h=harness(),tabs=h.load('src/lib/customer-tab.ts');
+  const identity={restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'visit',customerSessionId:'browser'};
+  const token=tabs.signCustomerTab(identity);assert.deepEqual(tabs.verifyCustomerTab(token),identity);
+  assert.equal(tabs.verifyCustomerTab(token+'x'),null);assert.equal(tabs.verifyCustomerTab('bad'),null);
 });

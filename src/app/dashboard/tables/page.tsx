@@ -1,19 +1,10 @@
 import { AutoRefresh } from "@/components/auto-refresh";
-import { Badge } from "@/components/ui/badge";
+import { DiningTableCard } from "@/components/staff/dining-table-card";
+import { getDiningTables } from "@/lib/dining-tables";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddTableForm } from "@/components/dashboard/add-table-form";
 import { requireCurrentRestaurant } from "@/lib/restaurant";
 import { createClient } from "@/lib/supabase/server";
-
-const STATUS_VARIANT: Record<string, "default" | "brand" | "secondary" | "destructive" | "outline"> = {
-  available: "secondary",
-  occupied: "default",
-  order_pending: "brand",
-  preparing: "default",
-  ready: "default",
-  bill_requested: "destructive",
-  cleaning: "outline",
-};
 
 export default async function TablesPage() {
   const restaurant = await requireCurrentRestaurant();
@@ -25,11 +16,7 @@ export default async function TablesPage() {
     .eq("restaurant_id", restaurant.restaurantId)
     .order("name");
 
-  const { data: tables } = await supabase
-    .from("restaurant_tables")
-    .select("id, label, status, branches!inner(id, name, restaurant_id)")
-    .eq("branches.restaurant_id", restaurant.restaurantId)
-    .order("label");
+  const tables = await getDiningTables(restaurant.restaurantId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -54,19 +41,7 @@ export default async function TablesPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {(tables ?? []).map((table) => (
-          <Card key={table.id}>
-            <CardContent className="flex items-center justify-between pt-6">
-              <div>
-                <p className="font-medium">{table.label}</p>
-                <p className="text-xs text-muted-foreground">
-                  {(table.branches as unknown as { name: string }).name}
-                </p>
-              </div>
-              <Badge variant={STATUS_VARIANT[table.status] ?? "secondary"}>
-                {table.status.replace("_", " ")}
-              </Badge>
-            </CardContent>
-          </Card>
+          <DiningTableCard key={table.id} table={table} owner canPay />
         ))}
         {(!tables || tables.length === 0) && (
           <p className="text-sm text-muted-foreground">No tables yet.</p>

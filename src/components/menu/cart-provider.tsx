@@ -1,88 +1,106 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
-
+import { useParams, useSearchParams } from "next/navigation";
 import { type CartLine, lineTotal } from "@/lib/cart-types";
 
+type Fields = {
+  couponCode?: string;
+  customerName?: string;
+  customerPhone?: string;
+};
+type Snapshot = {
+  lines: CartLine[];
+  submissionKey: string;
+  pending?: boolean;
+  fields?: Fields;
+};
 type CartContextValue = {
   lines: CartLine[];
   addLine: (line: Omit<CartLine, "key">) => void;
   updateQuantity: (key: string, quantity: number) => void;
   removeLine: (key: string) => void;
   clear: () => void;
+  beginSubmission: (fields: Fields) => { key: string; fields: Fields };
+  submissionFailed: () => void;
+  pendingSubmission: boolean;
   itemCount: number;
   subtotal: number;
 };
-
 const CartContext = createContext<CartContextValue | null>(null);
-
-function storageKey(restaurant: string, branch: string, table?: string) {
-  return `thaliq_cart:${restaurant}:${branch}:${table ?? "general"}`;
-}
-
 export function CartProvider({ children }: { children: React.ReactNode }) {
-  const params = useParams<{ restaurant: string; branch: string; table?: string }>();
-  const key = storageKey(params.restaurant, params.branch, params.table);
-
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [hydrated, setHydrated] = useState(false);
-
+  const params = useParams<{
+    restaurant: string;
+    branch: string;
+    table?: string;
+  }>();
+  const token = useSearchParams().get("session") ?? "general";
+  // Signed reference is used only as a storage namespace here; the server verifies it.
+  const storageKey = `qrcr_cart_v3:${params.restaurant}:${params.branch}:${params.table ?? "general"}:${token}`;
+  return (
+    <BrowserCart key={storageKey} storageKey={storageKey}>
+      {children}
+    </BrowserCart>
+  );
+}
+function BrowserCart({
+  children,
+  storageKey,
+}: {
+  children: React.ReactNode;
+  storageKey: string;
+}) {
+  const [cart, setCart] = useState<Snapshot>({ lines: [], submissionKey: "" });
   useEffect(() => {
-    // localStorage isn't available during SSR, so the cart starts empty on
-    // the server and hydrates from the browser's copy right after mount -
-    // this is the one-time sync-with-an-external-system case the lint rule
-    // otherwise warns about.
+    let saved: Snapshot = { lines: [], submissionKey: crypto.randomUUID() };
     try {
-      const raw = window.localStorage.getItem(key);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLines(raw ? JSON.parse(raw) : []);
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.lines) && parsed.submissionKey) saved = parsed;
+      }
     } catch {
-      setLines([]);
+      /* Start empty if storage was corrupted. */
     }
-    setHydrated(true);
-  }, [key]);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    window.localStorage.setItem(key, JSON.stringify(lines));
-  }, [key, lines, hydrated]);
-
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate this browser's visit-specific cart.
+    setCart(saved);
+  }, [storageKey]);
   const value = useMemo<CartContextValue>(() => {
-    const addLine: CartContextValue["addLine"] = (line) => {
-      setLines((prev) => [...prev, { ...line, key: crypto.randomUUID() }]);
-    };
-
-    const updateQuantity: CartContextValue["updateQuantity"] = (lineKey, quantity) => {
-      setLines((prev) =>
-        quantity <= 0
-          ? prev.filter((l) => l.key !== lineKey)
-          : prev.map((l) => (l.key === lineKey ? { ...l, quantity } : l)),
-      );
-    };
-
-    const removeLine: CartContextValue["removeLine"] = (lineKey) => {
-      setLines((prev) => prev.filter((l) => l.key !== lineKey));
-    };
-
-    const clear = () => setLines([]);
-
+    function save(next: Snapshot) {
+      localStorage.setItem(storageKey, JSON.stringify(next));
+      setCart(next);
+    }
+    function edit(lines: CartLine[]) {
+      if (!cart.pending) save({ lines, submissionKey: crypto.randomUUID() });
+    }
     return {
-      lines,
-      addLine,
-      updateQuantity,
-      removeLine,
-      clear,
-      itemCount: lines.reduce((sum, l) => sum + l.quantity, 0),
-      subtotal: lines.reduce((sum, l) => sum + lineTotal(l), 0),
+      lines: cart.lines,
+      pendingSubmission: !!cart.pending,
+      addLine: (line) =>
+        edit([...cart.lines, { ...line, key: crypto.randomUUID() }]),
+      updateQuantity: (key, quantity) =>
+        edit(
+          quantity <= 0
+            ? cart.lines.filter((l) => l.key !== key)
+            : cart.lines.map((l) => (l.key === key ? { ...l, quantity } : l)),
+        ),
+      removeLine: (key) => edit(cart.lines.filter((l) => l.key !== key)),
+      clear: () => save({ lines: [], submissionKey: crypto.randomUUID() }),
+      beginSubmission: (fields) => {
+        const key = cart.submissionKey || crypto.randomUUID();
+        const stored = cart.pending ? (cart.fields ?? fields) : fields;
+        save({ ...cart, fields: stored, submissionKey: key, pending: true });
+        return { key, fields: stored };
+      },
+      submissionFailed: () => save({ ...cart, pending: false }),
+      itemCount: cart.lines.reduce((n, l) => n + l.quantity, 0),
+      subtotal: cart.lines.reduce((n, l) => n + lineTotal(l), 0),
     };
-  }, [lines]);
-
+  }, [cart, storageKey]);
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }
-
-export function useCart(): CartContextValue {
+export function useCart() {
   const ctx = useContext(CartContext);
-  if (!ctx) throw new Error("useCart must be used within a CartProvider");
+  if (!ctx) throw new Error("Cart provider missing");
   return ctx;
 }

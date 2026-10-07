@@ -74,21 +74,9 @@ export async function markOrderServed(orderId: string) {
     changed_by_staff_id: session.staffId,
   });
 
-  // Reflect it on the floor plan: the table is occupied and eating rather
-  // than waiting on the kitchen.
   if (order.table_session_id) {
-    const { data: tableSession } = await admin
-      .from("table_sessions")
-      .select("table_id, status")
-      .eq("id", order.table_session_id)
-      .maybeSingle();
-
-    if (tableSession?.table_id && tableSession.status === "open") {
-      await admin
-        .from("restaurant_tables")
-        .update({ status: "occupied" })
-        .eq("id", tableSession.table_id);
-    }
+    const {error: tableError} = await admin.rpc("dining_refresh_table", {p_session: order.table_session_id});
+    if (tableError) throw new Error("Order served, but the table display could not refresh. Please refresh the screen.");
   }
 
   revalidatePath("/staff/waiter");
@@ -108,74 +96,19 @@ export async function resolveWaiterRequest(requestId: string) {
   revalidatePath("/staff/waiter");
 }
 
+/** Compatibility entry point: confirmation requires an existing pending attempt. */
 export async function markBillPaid(billId: string, method: "cash" | "upi" | "card") {
-  const session = await requireStaffSession("cashier");
+  const staff = await requireStaffSession("cashier");
   const admin = createAdminClient();
-
-  const { data: bill } = await admin
-    .from("bills")
-    .select("id, total_amount, restaurant_id, table_session_id")
-    .eq("id", billId)
-    .eq("restaurant_id", session.restaurantId)
-    .single();
-
-  if (!bill) return;
-
-  await admin
-    .from("bills")
-    .update({ status: "paid", closed_at: new Date().toISOString() })
-    .eq("id", billId);
-
-  await admin.from("payments").insert({
-    restaurant_id: session.restaurantId,
-    bill_id: billId,
-    method,
-    status: "paid",
-    amount: bill.total_amount,
-    recorded_by_staff_id: session.staffId,
-  });
-
-  if (bill.table_session_id) {
-    // Payment is the end of the lifecycle: everything still open on this
-    // table session becomes "completed", otherwise orders would linger as
-    // served/ready forever and skew the dashboard's pending count.
-    const { data: openOrders } = await admin
-      .from("orders")
-      .select("id")
-      .eq("table_session_id", bill.table_session_id)
-      .not("status", "in", "(completed,cancelled)");
-
-    if (openOrders && openOrders.length > 0) {
-      const ids = openOrders.map((o) => o.id);
-      await admin.from("orders").update({ status: "completed" }).in("id", ids);
-      await admin.from("order_status_history").insert(
-        ids.map((id) => ({
-          order_id: id,
-          status: "completed",
-          changed_by_staff_id: session.staffId,
-        })),
-      );
-    }
-
-    const { data: tableSession } = await admin
-      .from("table_sessions")
-      .select("table_id")
-      .eq("id", bill.table_session_id)
-      .maybeSingle();
-
-    await admin
-      .from("table_sessions")
-      .update({ status: "closed", closed_at: new Date().toISOString() })
-      .eq("id", bill.table_session_id);
-
-    // Free the table for the next guests.
-    if (tableSession?.table_id) {
-      await admin
-        .from("restaurant_tables")
-        .update({ status: "cleaning" })
-        .eq("id", tableSession.table_id);
-    }
-  }
-
+  let query = admin.from("bills").select("table_session_id, branch_id, table_sessions(table_id)").eq("id", billId).eq("restaurant_id", staff.restaurantId);
+  if (staff.branchId) query = query.eq("branch_id", staff.branchId);
+  const {data: bill} = await query.maybeSingle();
+  if (!bill) throw new Error("Bill not found.");
+  const {data: payment} = await admin.from("payments").select("attempt_key").eq("bill_id", billId).eq("status", "pending").eq("method", method).maybeSingle();
+  if (!payment?.attempt_key) throw new Error("Start payment first, then confirm only after payment is received.");
+  const {error} = await admin.rpc("dining_transition", {p_restaurant: staff.restaurantId, p_branch: bill.branch_id,
+    p_table: (bill.table_sessions as unknown as {table_id:string}).table_id, p_session: bill.table_session_id,
+    p_action: "confirm_payment", p_staff: staff.staffId, p_attempt: payment.attempt_key, p_method: method});
+  if (error) throw new Error(error.message);
   revalidatePath("/staff/cashier");
 }

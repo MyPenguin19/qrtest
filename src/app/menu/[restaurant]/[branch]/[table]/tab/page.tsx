@@ -12,6 +12,8 @@ export default async function CustomerTabPage(props: PageProps<"/menu/[restauran
   if (typeof token !== "string") notFound();
   const tab = await getCustomerTab(restaurant, branch, table, token);
   if (!tab) notFound();
+  if (tab.session.status === "closed") return <div className="mx-auto max-w-xl p-6"><h1 className="text-xl font-semibold">This visit has ended</h1><p>Thank you. Please scan the table QR for your next visit.</p></div>;
+  const canOrder = ["open", "bill_requested"].includes(tab.session.status);
   const menuUrl = `/menu/${encodeURIComponent(restaurant)}/${encodeURIComponent(branch)}/${encodeURIComponent(table)}?session=${encodeURIComponent(token)}`;
 
   return (
@@ -34,8 +36,8 @@ export default async function CustomerTabPage(props: PageProps<"/menu/[restauran
         </section>
       ))}
       <p className="flex justify-between border-t pt-4 font-semibold"><span>Running total</span><span>₹{tab.total.toFixed(2)}</span></p>
-      <Button asChild><Link href={menuUrl}>Order More</Link></Button>
-      <TabBillButton restaurant={restaurant} branch={branch} table={table} token={token} requested={tab.session.status === "bill_requested"} />
+      {canOrder ? <Button asChild><Link href={menuUrl}>Order More</Link></Button> : <p role="status">{tab.session.status === "paid" ? "Payment received. Staff will close your table." : "Payment pending. Please complete payment with staff."}</p>}
+      {canOrder && <TabBillButton restaurant={restaurant} branch={branch} table={table} token={token} requested={tab.session.status === "bill_requested"} />}
     </div>
   );
 }

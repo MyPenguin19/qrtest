@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type AdminClient = ReturnType<typeof createAdminClient>;
-export type TabIdentity = { restaurantId: string; branchId: string; tableId: string; sessionId: string };
+export type TabIdentity = { restaurantId: string; branchId: string; tableId: string; sessionId: string; customerSessionId?: string };
 
 // Separate signing purpose from staff cookies; this grants access only to one tab.
 function signature(payload: string) {
@@ -35,7 +35,7 @@ export async function findActiveTableSession(admin: AdminClient, tableId: string
   const { data, error } = await admin.from("table_sessions")
     .select("id, table_id, status")
     .eq("table_id", tableId)
-    .in("status", ["open", "bill_requested"])
+    .in("status", ["open", "bill_requested", "payment_pending", "paid"])
     .maybeSingle();
   // Never treat a query failure/multiple existing sessions as permission to create another.
   if (error) throw new Error("Could not identify the active table session. Please ask staff.");
@@ -45,7 +45,7 @@ export async function findActiveTableSession(admin: AdminClient, tableId: string
 export async function validateCustomerTab(
   admin: AdminClient,
   token: string,
-  expected: Omit<TabIdentity, "sessionId">,
+  expected: Omit<TabIdentity, "sessionId" | "customerSessionId">,
 ) {
   const identity = verifyCustomerTab(token);
   if (!identity || identity.restaurantId !== expected.restaurantId ||
@@ -63,7 +63,7 @@ export async function getCustomerTableContext(restaurantSlug: string, branchSlug
     .eq("restaurant_id", restaurant.id).eq("slug", branchSlug).eq("is_active", true).maybeSingle();
   if (!branch) return null;
   const { data: table } = await admin.from("restaurant_tables").select("id, label")
-    .eq("branch_id", branch.id).eq("id", tableId).maybeSingle();
+    .eq("branch_id", branch.id).eq("id", tableId).eq("is_active", true).maybeSingle();
   if (!table) return null;
   return { restaurant, branch, table, identity: {restaurantId: restaurant.id, branchId: branch.id, tableId: table.id} };
 }
@@ -81,8 +81,11 @@ export async function getCustomerTab(restaurantSlug: string, branchSlug: string,
   const context = await getCustomerTableContext(restaurantSlug, branchSlug, tableId);
   if (!context) return null;
   const admin = createAdminClient();
-  const session = await validateCustomerTab(admin, token, context.identity);
+  const identity = verifyCustomerTab(token);
+  if (!identity || identity.restaurantId !== context.restaurant.id || identity.branchId !== context.branch.id || identity.tableId !== tableId) return null;
+  const {data: session} = await admin.from("table_sessions").select("id, status").eq("id", identity.sessionId).eq("table_id", tableId).maybeSingle();
   if (!session) return null;
+  if (session.status === "closed") return {...context, session, orders: [], total: 0};
   const { data: orders, error } = await admin.from("orders")
     .select("id, order_number, status, total_amount, created_at, order_items(id, item_name, variant_name, quantity)")
     .eq("restaurant_id", context.restaurant.id).eq("branch_id", context.branch.id)

@@ -66,6 +66,7 @@ export async function resolveTable(branchId: string, tableId: string) {
     .select("id, label")
     .eq("id", tableId)
     .eq("branch_id", branchId)
+    .eq("is_active", true)
     .maybeSingle();
 
   return table;

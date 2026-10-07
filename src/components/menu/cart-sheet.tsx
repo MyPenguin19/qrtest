@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { lineTotal } from "@/lib/cart-types";
 
 export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const { lines, updateQuantity, removeLine, subtotal, clear } = useCart();
+  const { lines, updateQuantity, removeLine, subtotal, clear, beginSubmission, submissionFailed, pendingSubmission } = useCart();
   const params = useParams<{ restaurant: string; branch: string; table?: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -26,7 +26,11 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
   function handlePlaceOrder() {
     setError(null);
     startTransition(async () => {
+      try {
+      const submission = beginSubmission({couponCode:couponCode.trim()||undefined,customerName:customerName.trim()||undefined,customerPhone:customerPhone.trim()||undefined});
       const result = await placeOrder({
+        submissionKey: submission.key,
+        ...submission.fields,
         restaurantSlug: params.restaurant,
         branchSlug: params.branch,
         tableId: params.table,
@@ -38,12 +42,10 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
           quantity: l.quantity,
           specialInstructions: l.specialInstructions,
         })),
-        couponCode: couponCode.trim() || undefined,
-        customerName: customerName.trim() || undefined,
-        customerPhone: customerPhone.trim() || undefined,
       });
 
       if ("error" in result) {
+        submissionFailed();
         setError(result.error);
         return;
       }
@@ -51,6 +53,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
       clear();
       onOpenChange(false);
       router.push(result.tabUrl ?? `/menu/${params.restaurant}/${params.branch}/order/${result.orderId}`);
+      } catch { setError("Connection interrupted. Retry this same order; it will not be submitted twice."); }
     });
   }
 
@@ -79,6 +82,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
                 ) : null}
                 <div className="mt-1 flex items-center gap-2">
                   <Button
+                    disabled={pendingSubmission}
                     type="button"
                     variant="outline"
                     size="icon"
@@ -89,6 +93,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
                   </Button>
                   <span className="w-4 text-center text-sm">{line.quantity}</span>
                   <Button
+                    disabled={pendingSubmission}
                     type="button"
                     variant="outline"
                     size="icon"
@@ -99,6 +104,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
                   </Button>
                   <button
                     type="button"
+                    disabled={pendingSubmission}
                     onClick={() => removeLine(line.key)}
                     className="ml-2 text-xs text-muted-foreground underline"
                   >
@@ -127,6 +133,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
                 <Label htmlFor="couponCode">Coupon code (optional)</Label>
                 <Input
                   id="couponCode"
+                  disabled={pendingSubmission}
                   value={couponCode}
                   onChange={(e) => setCouponCode(e.target.value)}
                   placeholder="WEEKEND20"
@@ -135,11 +142,12 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
               <div className="flex gap-3">
                 <div className="flex flex-1 flex-col gap-1.5">
                   <Label htmlFor="customerName">Name (optional)</Label>
-                  <Input id="customerName" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+                  <Input disabled={pendingSubmission} id="customerName" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
                 </div>
                 <div className="flex flex-1 flex-col gap-1.5">
                   <Label htmlFor="customerPhone">Mobile (optional)</Label>
                   <Input
+                    disabled={pendingSubmission}
                     id="customerPhone"
                     value={customerPhone}
                     onChange={(e) => setCustomerPhone(e.target.value)}
@@ -149,6 +157,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
               </div>
             </div>
 
+            {pendingSubmission && <p className="text-sm">Retry the unchanged order after a connection error. The same submission will only be saved once.</p>}
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
             <Button onClick={handlePlaceOrder} disabled={isPending} className="w-full">
