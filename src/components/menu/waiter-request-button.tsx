@@ -12,7 +12,6 @@ const OPTIONS = [
   { value: "call_waiter", label: "Call waiter" },
   { value: "water", label: "Water" },
   { value: "cutlery", label: "Cutlery" },
-  { value: "bill", label: "Request bill" },
   { value: "other", label: "Other" },
 ];
 

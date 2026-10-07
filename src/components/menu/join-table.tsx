@@ -8,10 +8,12 @@ export function JoinTable({
   restaurant,
   branch,
   table,
+  existingToken,
 }: {
   restaurant: string;
   branch: string;
   table: string;
+  existingToken?: string;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +25,7 @@ export function JoinTable({
         const key = "qrcr_browser";
         const device = localStorage.getItem(key) || crypto.randomUUID();
         localStorage.setItem(key, device);
-        const result = await joinDiningTable(restaurant, branch, table, device);
+        const result = await joinDiningTable(restaurant, branch, table, device, existingToken);
         if (!active) return;
         if (result.error) setError(result.error);
         else
@@ -38,7 +40,7 @@ export function JoinTable({
     return () => {
       active = false;
     };
-  }, [restaurant, branch, table, router, retry]);
+  }, [restaurant, branch, table, existingToken, router, retry]);
   return (
     <div className="mx-auto max-w-xl p-6">
       <p role="status">{error || "Opening your table…"}</p>

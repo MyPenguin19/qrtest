@@ -1,0 +1,49 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Optional Chrome component test runner. */
+// ESBUILD_MODULE and PLAYWRIGHT_MODULE may point to externally installed test tools.
+const esbuild=require(process.env.ESBUILD_MODULE||'esbuild');
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const http=require('node:http'),path=require('node:path'),assert=require('node:assert/strict');
+(async()=>{
+  const root=path.resolve(__dirname,'../..');
+  const adapter=path.join(__dirname,'payment-adapters.tsx');
+  const {outputFiles}=await esbuild.build({entryPoints:[path.join(__dirname,'payment-fixture.tsx')],bundle:true,write:false,jsx:'automatic',alias:{'@':path.join(root,'src'),'next/navigation':adapter,'next/link':adapter,'@/app/actions/dining':adapter}});
+  const calls=[];let rejectCounter=false,rejectManual=false;
+  const server=http.createServer(async(req,res)=>{
+    if(req.url==='/bundle.js'){res.setHeader('content-type','text/javascript');return res.end(outputFiles[0].text);}
+    if(req.method==='POST'){
+      let body='';for await(const chunk of req)body+=chunk;calls.push({url:req.url,input:JSON.parse(body)});
+      res.setHeader('content-type','application/json');
+      return res.end(JSON.stringify({error:(req.url==='/counter'?rejectCounter:rejectManual)?'Your table session has ended.':null}));
+    }
+    res.end('<!doctype html><html><head><title>Payment component tests</title></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  let browser;
+  try {
+    browser=await chromium.launch({channel:'chrome',headless:true});
+    const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.getByRole('button',{name:'Pay Now',exact:true}).click();
+    assert.equal(await page.getByRole('button',{name:'Pay by Card',exact:true}).isDisabled(),true);
+    assert.match(await page.getByRole('dialog').innerText(),/Online card payment is unavailable/);
+    assert.equal(calls.length,0);console.log('PASS Pay Now is optional and unavailable card checkout makes no payment request');
+    assert.equal(await page.getByRole('link',{name:'Keep Ordering'}).getAttribute('href'),'/menu/a/main/table?session=original-signed-visit');
+    await page.getByRole('button',{name:'Close',exact:true}).click();assert.equal(calls.length,0);console.log('PASS dismiss and Keep Ordering retain the same visit without mutations');
+    await page.getByRole('button',{name:'Pay Now',exact:true}).click();rejectCounter=true;
+    await page.getByRole('button',{name:'Pay at Counter',exact:true}).click();
+    await page.getByRole('dialog').getByRole('alert').waitFor();assert.match(await page.getByRole('alert').innerText(),/session has ended/);assert.equal(await page.getByRole('status').count(),0);
+    console.log('PASS stale counter action displays server rejection without a success message');
+    rejectCounter=false;await page.getByRole('button',{name:'Pay at Counter',exact:true}).click();
+    await page.getByRole('status').waitFor();assert.match(await page.getByRole('status').innerText(),/30.00/);assert.match(await page.getByRole('status').innerText(),/table is still open/);
+    assert.equal(calls.at(-1).input.token,'original-signed-visit');await page.getByText('Customer intends to pay at counter').waitFor();console.log('PASS counter confirmation uses refreshed total and staff sees intent');
+    await page.reload();
+    await page.getByRole('button',{name:'Close table manually'}).click();
+    assert.match(await page.getByRole('dialog').innerText(),/does not verify an external payment/);
+    await page.getByRole('button',{name:'Keep table open'}).click();assert.equal(calls.filter(c=>c.url==='/manual').length,0);
+    await page.getByRole('button',{name:'Close table manually'}).click();await page.getByLabel('Closure reason').selectOption('manual_unsettled');rejectManual=true;
+    await page.getByRole('button',{name:'Confirm manual closure'}).click();await page.getByRole('dialog').getByRole('alert').waitFor();console.log('PASS manual closure requires an explicit choice and reports server errors');
+    rejectManual=false;await page.getByRole('button',{name:'Confirm manual closure'}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+    const manual=calls.at(-1).input;assert.equal(manual.action,'manual_close');assert.equal(manual.sessionId,'visit-A');assert.equal(manual.closureReason,'manual_unsettled');console.log('PASS staff closes without customer payment intent using original visit and chosen reason');
+    assert.deepEqual(errors,[]);
+  }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
+})().catch(e=>{console.error(e);process.exitCode=1;});

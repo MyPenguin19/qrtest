@@ -13,19 +13,19 @@ function harness() {
   const db = {
     restaurants: [{ id: 'A', slug: 'a', name: 'A', status: 'active', tax_percent: 0, service_charge_percent: 0 }, { id: 'B', slug: 'b', status: 'active' }],
     branches: [{ id: 'branch-a', restaurant_id: 'A', slug: 'main', is_active: true }],
-    restaurant_tables: [{ id: 'table-1', branch_id: 'branch-a', label: '1', status: 'available' }],
+    restaurant_tables: [{ id: 'table-1', branch_id: 'branch-a', label: '1', status: 'available', is_active: true }],
     menu_items: [{ id: 'item-1', restaurant_id: 'A', name: 'Tea', base_price: 10, is_available: true, menu_variants: [], menu_addons: [] }],
     restaurant_members: [{ user_id: 'owner-a', role: 'owner', restaurants: {id: 'A', name: 'A', slug: 'a'} }],
     platform_admins: [{user_id: 'admin'}],
     restaurant_themes: [], menu_categories: [], staff: [], table_sessions: [], orders: [], order_items: [], order_status_history: [], customers: [], bills: [], payments: [], waiter_requests: [],
   };
   const jar = new Map();
-  const state = { user: {id: 'owner-a'}, writes: [], revalidated: [], failUpdate: false, id: 0 };
+  const state = { user: {id: 'owner-a'}, writes: [], revalidated: [], failUpdate: false, id: 0, rpcCalls: [], rpcResult: {error:null} };
   function from(table) {
     const filters = []; let op = 'select', values, single = false, selection;
     const query = {
       select(columns) { selection = columns; return this; },
-      eq(k,v) { filters.push(r => r[k] === v); return this; },
+      eq(k,v) { filters.push(r => (k === 'branches.restaurant_id' ? db.branches.find(b=>b.id===r.branch_id)?.restaurant_id : r[k]) === v); return this; },
       is(k,v) { filters.push(r => r[k] === v); return this; },
       neq(k,v) { filters.push(r => r[k] !== v); return this; },
       in(k,v) { filters.push(r => v.includes(r[k])); return this; },
@@ -58,7 +58,7 @@ function harness() {
       }
     }; return query;
   }
-  const client = {from, rpc:async(name,args)=>{assert.equal(name,'dining_refresh_table');const session=db.table_sessions.find(s=>s.id===args.p_session);if(session?.status==='open')db.restaurant_tables.find(t=>t.id===session.table_id).status='occupied';return {error:null};}, auth:{getUser:async()=>({data:{user:state.user}})}};
+  const client = {from, rpc:async(name,args)=>{state.rpcCalls.push({name,args});if(name!=='dining_refresh_table')return state.rpcResult;const session=db.table_sessions.find(s=>s.id===args.p_session);if(session?.status==='open')db.restaurant_tables.find(t=>t.id===session.table_id).status='occupied';return {error:null};}, auth:{getUser:async()=>({data:{user:state.user}})}};
   const cache = new Map();
   function load(relative) {
     const filename = path.resolve(__dirname,'..',relative);
@@ -213,4 +213,43 @@ test('signed customer references reject forgery and bind restaurant, branch, tab
   const identity={restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'visit',customerSessionId:'browser'};
   const token=tabs.signCustomerTab(identity);assert.deepEqual(tabs.verifyCustomerTab(token),identity);
   assert.equal(tabs.verifyCustomerTab(token+'x'),null);assert.equal(tabs.verifyCustomerTab('bad'),null);
+});
+
+test('3.1 counter action binds signed identity, rejects altered/foreign tokens, reports database rejection',async()=>{
+  const h=harness(),sign=h.load('src/lib/customer-tab.ts').signCustomerTab;
+  const identity={restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'visit-a',customerSessionId:'device-a'};
+  const action=h.load('src/app/actions/dining.ts').chooseCounterPayment;
+  assert.ok((await action('a','main','table-1','forged')).error);assert.equal(h.state.rpcCalls.length,0);
+  assert.ok((await action('a','main','table-1',sign({...identity,restaurantId:'B'}))).error);assert.equal(h.state.rpcCalls.length,0);
+  assert.equal((await action('a','main','table-1',sign(identity))).error,null);
+  assert.deepEqual(h.state.rpcCalls[0],{name:'dining_counter_intent',args:{p_restaurant:'A',p_branch:'branch-a',p_table:'table-1',p_session:'visit-a',p_customer_session:'device-a'}});
+  h.state.rpcResult={error:{message:'Your table session has ended.'}};
+  assert.match((await action('a','main','table-1',sign(identity))).error,/ended/);
+});
+test('3.1 manual close action derives staff identity and rejects another tenant table',async()=>{
+  const h=harness(),staffId=await h.login('cashier');
+  const action=h.load('src/app/actions/dining.ts').changeDiningSession;
+  assert.equal((await action({tableId:'table-1',sessionId:'visit-a',action:'manual_close',closureReason:'manual_unsettled'})).error,null);
+  assert.equal(h.state.rpcCalls[0].name,'dining_manual_close');assert.equal(h.state.rpcCalls[0].args.p_staff,staffId);assert.equal(h.state.rpcCalls[0].args.p_user,null);
+  h.db.branches.push({id:'branch-b',restaurant_id:'B'});h.db.restaurant_tables.push({id:'foreign',branch_id:'branch-b'});
+  assert.ok((await action({tableId:'foreign',sessionId:'foreign',action:'manual_close'})).error);assert.equal(h.state.rpcCalls.length,1);
+});
+test('3.1 legitimate closed pages show ended state even if the table is disabled; no later-party data',async()=>{
+  const h=harness(),sign=h.load('src/lib/customer-tab.ts').signCustomerTab;
+  h.db.restaurant_tables[0].is_active=false;
+  h.db.table_sessions.push({id:'old',table_id:'table-1',status:'closed'},{id:'new',table_id:'table-1',status:'open'});
+  h.db.orders.push({id:'new-order',table_session_id:'new',restaurant_id:'A',branch_id:'branch-a',total_amount:10,status:'pending'});
+  const token=sign({restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'old',customerSessionId:'old-device'});
+  const props={params:Promise.resolve({restaurant:'a',branch:'main',table:'table-1'}),searchParams:Promise.resolve({session:token})};
+  for(const file of ['src/app/menu/[restaurant]/[branch]/[table]/page.tsx','src/app/menu/[restaurant]/[branch]/[table]/tab/page.tsx']){
+    const rendered=JSON.stringify(await h.load(file).default(props));assert.match(rendered,/Your table session has ended/);assert.doesNotMatch(rendered,/new-order/);
+  }
+});
+test('3.1 Add More Items link retains the original signed session and shows current total',async()=>{
+  const h=harness(),sign=h.load('src/lib/customer-tab.ts').signCustomerTab;
+  h.db.table_sessions.push({id:'active',table_id:'table-1',status:'open',payment_intent:'counter'});
+  h.db.orders.push({id:'first',table_session_id:'active',restaurant_id:'A',branch_id:'branch-a',total_amount:10,status:'pending'},{id:'second',table_session_id:'active',restaurant_id:'A',branch_id:'branch-a',total_amount:15,status:'pending'});
+  const token=sign({restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'active',customerSessionId:'device'});
+  const rendered=JSON.stringify(await h.load('src/app/menu/[restaurant]/[branch]/[table]/tab/page.tsx').default({params:Promise.resolve({restaurant:'a',branch:'main',table:'table-1'}),searchParams:Promise.resolve({session:token})}));
+  assert.match(rendered,/Add More Items/);assert.ok(rendered.includes('?session='+encodeURIComponent(token)));assert.match(rendered,/25.00/);assert.doesNotMatch(rendered,/Request Bill/);
 });

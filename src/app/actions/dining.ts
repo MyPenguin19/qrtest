@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { getCustomerTableContext, signCustomerTab } from "@/lib/customer-tab";
+import { getCustomerTableContext, signCustomerTab, verifyCustomerTab } from "@/lib/customer-tab";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { requireCurrentRestaurant } from "@/lib/restaurant";
@@ -12,15 +12,20 @@ export async function joinDiningTable(
   branch: string,
   table: string,
   device: string,
+  existingToken?: string,
 ) {
   const context = await getCustomerTableContext(restaurant, branch, table);
   if (!context)
     return { error: "This table is unavailable. Please ask staff." };
+  const previous = existingToken ? verifyCustomerTab(existingToken) : null;
+  if (existingToken && (!previous || previous.restaurantId !== context.restaurant.id || previous.branchId !== context.branch.id || previous.tableId !== table))
+    return {error:"This visit does not match your table."};
   const { data, error } = await createAdminClient().rpc("dining_join", {
     p_restaurant: context.restaurant.id,
     p_branch: context.branch.id,
     p_table: table,
     p_device: device,
+    p_expected_session: previous?.sessionId ?? null,
   });
   if (error) return { error: error.message };
   return {
@@ -39,6 +44,7 @@ export async function changeDiningSession(input: {
   owner?: boolean;
   attemptKey?: string;
   method?: string;
+  closureReason?: "external_manual" | "manual_unsettled";
 }) {
   const admin = createAdminClient();
   let restaurantId: string,
@@ -68,7 +74,13 @@ export async function changeDiningSession(input: {
     .maybeSingle();
   if (!table || (branchId && table.branch_id !== branchId))
     return { error: "Table not found." };
-  const { error } = await admin.rpc("dining_transition", {
+  const { error } = input.action === "manual_close"
+    ? await admin.rpc("dining_manual_close", {
+      p_restaurant: restaurantId, p_branch: table.branch_id, p_table: input.tableId,
+      p_session: input.sessionId, p_staff: staffId, p_user: userId,
+      p_reason: input.closureReason ?? "external_manual",
+    })
+    : await admin.rpc("dining_transition", {
     p_restaurant: restaurantId,
     p_branch: table.branch_id,
     p_table: input.tableId,
@@ -88,4 +100,21 @@ export async function changeDiningSession(input: {
   ])
     revalidatePath(path);
   return { error: null };
+}
+
+
+export async function chooseCounterPayment(restaurant: string, branch: string, table: string, token: string) {
+  const identity = verifyCustomerTab(token);
+  if (!identity?.customerSessionId) return { error: "Open your table menu before choosing payment." };
+  const context = await getCustomerTableContext(restaurant, branch, table);
+  if (!context || identity.restaurantId !== context.restaurant.id || identity.branchId !== context.branch.id || identity.tableId !== table)
+    return { error: "This payment choice does not match your table." };
+  const {error} = await createAdminClient().rpc("dining_counter_intent", {
+    p_restaurant: identity.restaurantId, p_branch: identity.branchId, p_table: identity.tableId,
+    p_session: identity.sessionId, p_customer_session: identity.customerSessionId,
+  });
+  if(error) return {error:error.message};
+  for(const path of ["/staff/orders", "/staff/cashier", "/dashboard/tables"])
+    revalidatePath(path);
+  return {error:null};
 }

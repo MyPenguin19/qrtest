@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { CustomerMenu } from "@/components/menu/customer-menu";
 import { JoinTable } from "@/components/menu/join-table";
 import { getMenuData, resolveTable } from "@/lib/menu-data";
@@ -13,32 +14,26 @@ export default async function TableMenuPage(
   props: PageProps<"/menu/[restaurant]/[branch]/[table]">,
 ) {
   const { restaurant, branch, table: tableId } = await props.params;
+  const { session: token } = await props.searchParams;
+  if (token !== undefined && typeof token !== "string") notFound();
+  const tab = token ? await getCustomerTab(restaurant, branch, tableId, token) : null;
+  if (token && !tab) notFound();
+  if (tab?.session.status === "closed")
+    return <div className="p-6"><h1>Thank you</h1><p>Your table session has ended.</p></div>;
   const data = await getMenuData(restaurant, branch);
   if (!data) notFound();
   const table = await resolveTable(data.branch.id, tableId);
   if (!table) notFound();
-  const { session: token } = await props.searchParams;
-  if (token === undefined)
-    return (
-      <JoinTable restaurant={restaurant} branch={branch} table={tableId} />
-    );
-  if (typeof token !== "string") notFound();
-  const tab = await getCustomerTab(restaurant, branch, tableId, token);
-  if (!tab) notFound();
-  if (tab.session.status === "closed")
-    return (
-      <div className="p-6">
-        <h1>This visit has ended</h1>
-        <p>Please scan the table QR to start a new visit.</p>
-      </div>
-    );
+  if (token === undefined) return <JoinTable restaurant={restaurant} branch={branch} table={tableId} />;
+  if (!token || !tab) notFound();
   if (!verifyCustomerTab(token)?.customerSessionId)
     return (
-      <JoinTable restaurant={restaurant} branch={branch} table={tableId} />
+      <JoinTable restaurant={restaurant} branch={branch} table={tableId} existingToken={token} />
     );
   if (["payment_pending", "paid"].includes(tab.session.status))
     return (
       <div className="p-6">
+        <AutoRefresh intervalMs={4000} />
         <p>Ordering is paused while your bill is being settled.</p>
         <Link
           className="underline"
@@ -50,6 +45,7 @@ export default async function TableMenuPage(
     );
   return (
     <>
+      <AutoRefresh intervalMs={4000} />
       <div className="mx-auto max-w-xl p-4">
         <Link
           className="text-sm font-medium underline"

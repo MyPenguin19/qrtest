@@ -54,16 +54,19 @@ export async function validateCustomerTab(
   return session?.id === identity.sessionId ? session : null;
 }
 
-export async function getCustomerTableContext(restaurantSlug: string, branchSlug: string, tableId: string) {
+export async function getCustomerTableContext(restaurantSlug: string, branchSlug: string, tableId: string, includeUnavailable = false) {
   const admin = createAdminClient();
-  const { data: restaurant } = await admin.from("restaurants").select("id, name")
-    .eq("slug", restaurantSlug).eq("status", "active").maybeSingle();
+  let restaurantQuery = admin.from("restaurants").select("id, name, status").eq("slug", restaurantSlug);
+  if (!includeUnavailable) restaurantQuery = restaurantQuery.eq("status", "active");
+  const {data: restaurant} = await restaurantQuery.maybeSingle();
   if (!restaurant) return null;
-  const { data: branch } = await admin.from("branches").select("id")
-    .eq("restaurant_id", restaurant.id).eq("slug", branchSlug).eq("is_active", true).maybeSingle();
+  let branchQuery = admin.from("branches").select("id, is_active").eq("restaurant_id", restaurant.id).eq("slug", branchSlug);
+  if (!includeUnavailable) branchQuery = branchQuery.eq("is_active", true);
+  const {data: branch} = await branchQuery.maybeSingle();
   if (!branch) return null;
-  const { data: table } = await admin.from("restaurant_tables").select("id, label")
-    .eq("branch_id", branch.id).eq("id", tableId).eq("is_active", true).maybeSingle();
+  let tableQuery = admin.from("restaurant_tables").select("id, label, is_active").eq("branch_id", branch.id).eq("id", tableId);
+  if (!includeUnavailable) tableQuery = tableQuery.eq("is_active", true);
+  const {data: table} = await tableQuery.maybeSingle();
   if (!table) return null;
   return { restaurant, branch, table, identity: {restaurantId: restaurant.id, branchId: branch.id, tableId: table.id} };
 }
@@ -78,14 +81,15 @@ export function tabTotal(orders: {status: string; total_amount: number}[]) {
 }
 
 export async function getCustomerTab(restaurantSlug: string, branchSlug: string, tableId: string, token: string) {
-  const context = await getCustomerTableContext(restaurantSlug, branchSlug, tableId);
+  const context = await getCustomerTableContext(restaurantSlug, branchSlug, tableId, true);
   if (!context) return null;
   const admin = createAdminClient();
   const identity = verifyCustomerTab(token);
   if (!identity || identity.restaurantId !== context.restaurant.id || identity.branchId !== context.branch.id || identity.tableId !== tableId) return null;
-  const {data: session} = await admin.from("table_sessions").select("id, status").eq("id", identity.sessionId).eq("table_id", tableId).maybeSingle();
+  const {data: session} = await admin.from("table_sessions").select("id, status, payment_intent").eq("id", identity.sessionId).eq("table_id", tableId).maybeSingle();
   if (!session) return null;
   if (session.status === "closed") return {...context, session, orders: [], total: 0};
+  if (context.restaurant.status !== "active" || !context.branch.is_active || !context.table.is_active) return null;
   const { data: orders, error } = await admin.from("orders")
     .select("id, order_number, status, total_amount, created_at, order_items(id, item_name, variant_name, quantity)")
     .eq("restaurant_id", context.restaurant.id).eq("branch_id", context.branch.id)

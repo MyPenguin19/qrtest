@@ -6,7 +6,7 @@ export async function getDiningTables(
   let query = createAdminClient()
     .from("restaurant_tables")
     .select(
-      "id, label, status, branch_id, branches!inner(restaurant_id), table_sessions(id, status, opened_at, orders(id, order_number, status, total_amount), bills(id, payments(attempt_key, status, method)))",
+      "id, label, status, branch_id, branches!inner(restaurant_id), table_sessions(id, status, opened_at, payment_intent, orders(id, order_number, status, total_amount), bills(id, payments(attempt_key, status, method)))",
     )
     .eq("branches.restaurant_id", restaurantId)
     .order("label");
@@ -24,6 +24,7 @@ export async function getDiningTables(
       status: table.status,
       sessionId: session?.id ?? null,
       sessionStatus: session?.status ?? null,
+      paymentIntent: session?.payment_intent ?? null,
       orderCount: session?.orders.length ?? 0,
       total:
         session?.orders

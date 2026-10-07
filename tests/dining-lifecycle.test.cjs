@@ -16,7 +16,7 @@ before(async()=>{
     db={query:(...args)=>client.query(...args),exec:sql=>client.query(sql),close:async()=>{client.release();await nativePool.end();}};
   } else db=new PGlite();
   await db.exec(`create schema auth; create table auth.users(id uuid primary key,raw_user_meta_data jsonb,phone text); do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role bypassrls; end if; end $$; create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007103504_dining_lifecycle_states.sql','20261007103510_atomic_dining_lifecycle.sql']) {
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007103504_dining_lifecycle_states.sql','20261007103510_atomic_dining_lifecycle.sql','20261007204919_optional_customer_payment.sql']) {
     await db.exec(fs.readFileSync(`supabase/migrations/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
@@ -205,4 +205,88 @@ test('database rejects payment-pending without an attempt and paid bill without 
 test('orders cannot be detached from their original dining history',async()=>{
   const f=await fixture(),s=await join(f),o=await submit(f,s);
   await assert.rejects(q('update orders set table_session_id=null where id=$1',[o.orderId]),/cannot move between visits/);
+});
+
+async function counter(f,s){return(await one('select dining_counter_intent($1,$2,$3,$4,$5) result',[f.r,f.b,f.t,s.sessionId,s.customerSessionId])).result;}
+async function manual(f,s,reason='external_manual',staff=f.staff,user=null){return(await one('select dining_manual_close($1,$2,$3,$4,$5,$6,$7) result',[f.r,f.b,f.t,s.sessionId,staff,user,reason])).result;}
+
+test('3.1 A: two devices submit distinct rounds and keep an authoritative shared total',async()=>{
+  const f=await fixture(),a=await join(f),b=await join(f,uuid());
+  const items=[];
+  for(const [name,price] of [['Coke',4],['Burger',15],['Pizza',18]]){
+    const id=uuid();await q('insert into menu_items(id,restaurant_id,category_id,name,base_price) values($1,$2,$3,$4,$5)',[id,f.r,f.category,name,price]);items.push(id);
+  }
+  const body=payload(f);body.lines=[items[0],items[1]].map(itemId=>({...body.lines[0],itemId}));
+  const first=await submit(f,a,uuid(),body);const second=await submit(f,b);
+  const thirdBody=payload(f);thirdBody.lines[0].itemId=items[2];const third=await submit(f,a,uuid(),thirdBody);
+  assert.equal(new Set([first.orderId,second.orderId,third.orderId]).size,3);
+  assert.equal((await one('select sum(total_amount) total from orders where table_session_id=$1',[a.sessionId])).total,'42.00');
+  assert.equal((await one('select count(*) n from order_items where order_id in (select id from orders where table_session_id=$1)',[a.sessionId])).n,4);
+});
+test('3.1 B: counter intent is idempotent, stays open, creates no payment, allows more orders',async()=>{
+  const f=await fixture(),s=await join(f);await submit(f,s);assert.equal((await counter(f,s)).total,5);
+  const at=(await one('select payment_intent_at from table_sessions where id=$1',[s.sessionId])).payment_intent_at;
+  await counter(f,s);await submit(f,s);assert.equal((await counter(f,s)).total,10);
+  assert.equal((await state(f,s)).status,'open');assert.equal((await state(f,s)).paid_at,null);
+  assert.equal((await one('select payment_intent from table_sessions where id=$1',[s.sessionId])).payment_intent,'counter');
+  assert.deepEqual((await one('select payment_intent_at from table_sessions where id=$1',[s.sessionId])).payment_intent_at,at);
+  assert.equal((await one('select count(*) n from payments where restaurant_id=$1',[f.r])).n,0);
+});
+test('3.1 C: staff closes without any customer payment action; history remains, no verified payment',async()=>{
+  const f=await fixture(),s=await join(f),o=await submit(f,s);await manual(f,s);
+  const row=await one('select * from table_sessions where id=$1',[s.sessionId]);
+  assert.equal(row.status,'closed');assert.equal(row.payment_intent,null);assert.equal(row.paid_at,null);assert.equal(row.closed_reason,'external_manual');assert.equal(row.closed_by_staff_id,f.staff);
+  assert.equal((await state(f,s)).table_status,'available');
+  const savedBill=await one('select * from bills where table_session_id=$1',[s.sessionId]);assert.notEqual(savedBill.status,'paid');assert.ok(savedBill.closed_at);assert.equal(savedBill.total_amount,'5.00');
+  assert.equal((await one('select count(*) n from order_items where order_id=$1',[o.orderId])).n,1);
+  assert.equal((await one('select count(*) n from payments where restaurant_id=$1',[f.r])).n,0);
+  await manual(f,s);assert.deepEqual((await state(f,s)).closed_at,row.closed_at);
+});
+test('3.1 D: old device cannot order or set intent on next party; new party orders normally',async()=>{
+  const f=await fixture(),a=await join(f);await submit(f,a);await manual(f,a);const b=await join(f,uuid());
+  assert.notEqual(a.sessionId,b.sessionId);await assert.rejects(submit(f,a),/Ordering has ended/);await assert.rejects(counter(f,a),/ended/);
+  await submit(f,b);assert.equal((await one('select count(*) n from orders where table_session_id=$1',[b.sessionId])).n,1);
+});
+test('3.1 manual closure rejects foreign/unauthorized actors and unresolved payments',async()=>{
+  const a=await fixture(),b=await fixture(),s=await join(a);await submit(a,s);
+  await assert.rejects(manual(a,s,'external_manual',b.staff),/not authorized/);
+  await assert.rejects(manual(a,s,'external_manual',null,b.u),/not authorized/);
+  await q("update staff set role='kitchen' where id=$1",[a.staff]);await assert.rejects(manual(a,s),/not authorized/);
+  await q("update staff set role='cashier' where id=$1",[a.staff]);await bill(a,s);await action(a,s,'start_payment',uuid());await assert.rejects(manual(a,s),/Resolve the pending/);
+});
+test('3.1 manual clear preserves unpaid truth and allows owner closure after bill request',async()=>{
+  const f=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);await manual(f,s,'manual_unsettled',null,f.u);
+  const row=await one('select closed_reason,closed_by,paid_at from table_sessions where id=$1',[s.sessionId]);assert.deepEqual(row,{closed_reason:'manual_unsettled',closed_by:f.u,paid_at:null});
+  await assert.rejects(q("update table_sessions set closed_at=now() where id=$1",[s.sessionId]),/immutable/);
+});
+test('3.1 counter intent rejects mismatched tenant, device and closed session',async()=>{
+  const a=await fixture(),b=await fixture(),s=await join(a),other=await join(b);
+  await assert.rejects(counter({...a,t:b.t},s),/does not belong/);
+  await assert.rejects(counter(a,{...s,customerSessionId:other.customerSessionId}),/browser/);
+  await manual(a,s);await assert.rejects(counter(a,s),/ended/);
+});
+if(process.env.DINING_TEST_DATABASE_URL) test('3.1 F: order racing manual closure is included before close or rejected, never orphaned',async()=>{
+  for(let i=0;i<6;i++){
+    const f=await fixture(),s=await join(f);await submit(f,s);
+    const results=await Promise.allSettled([
+      nativePool.query('select dining_manual_close($1,$2,$3,$4,$5,null,$6)',[f.r,f.b,f.t,s.sessionId,f.staff,'external_manual']),
+      nativePool.query('select dining_submit($1,$2,$3,$4,$5,$6,$7)',[f.r,f.b,f.t,s.sessionId,s.customerSessionId,uuid(),payload(f)])
+    ]);
+    assert.equal(results[0].status,'fulfilled');
+    if(results[1].status==='rejected') assert.match(results[1].reason.message,/Ordering has ended/);
+    const total=await one('select sum(total_amount) total,count(*) n from orders where table_session_id=$1',[s.sessionId]);
+    assert.equal(total.n,results[1].status==='fulfilled'?2:1);
+    assert.equal((await one('select total_amount from bills where table_session_id=$1',[s.sessionId])).total_amount,total.total);
+    assert.equal((await state(f,s)).status,'closed');const next=await join(f);assert.notEqual(next.sessionId,s.sessionId);await submit(f,next);
+  }
+});
+
+test('3.1 legacy page can resume only its original active visit, including at QR upgrade',async()=>{
+  const f=await fixture(),a=await join(f);
+  const resume=()=>one('select dining_join($1,$2,$3,$4,$5) result',[f.r,f.b,f.t,f.device,a.sessionId]);
+  assert.equal((await resume()).result.sessionId,a.sessionId);
+  await manual(f,a);await assert.rejects(resume(),/session has ended/);
+  const b=await join(f,uuid());await assert.rejects(resume(),/session has ended/);
+  assert.notEqual(b.sessionId,a.sessionId);
+  assert.equal((await one('select count(*) n from customer_sessions where table_session_id=$1',[b.sessionId])).n,1);
 });

@@ -21,6 +21,7 @@ export default async function CashierPage() {
     .from("bills")
     .select("id, total_amount, table_sessions(restaurant_tables(label))")
     .neq("status", "paid")
+    .is("closed_at", null)
     .eq("restaurant_id", session.restaurantId)
     .order("created_at");
 
