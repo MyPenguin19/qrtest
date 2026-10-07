@@ -10,9 +10,9 @@ import { verifyPin } from "@/lib/staff-pin";
 export type StaffLoginState = { error: string | null };
 
 const ROLE_HOME: Record<string, string> = {
-  waiter: "/staff/waiter",
-  kitchen: "/staff/kitchen",
-  cashier: "/staff/cashier",
+  waiter: "/staff/orders",
+  kitchen: "/staff/orders",
+  cashier: "/staff/orders",
 };
 
 /**

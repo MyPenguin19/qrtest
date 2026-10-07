@@ -5,29 +5,35 @@ import { revalidatePath } from "next/cache";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireStaffSession } from "@/lib/staff-session";
 
-const KITCHEN_NEXT_STATUS: Record<string, string> = {
-  pending: "accepted",
+const ORDER_NEXT_STATUS: Record<string, string> = {
+  pending: "preparing",
   accepted: "preparing",
   preparing: "ready",
 };
 
-export async function advanceOrderStatus(orderId: string) {
-  const session = await requireStaffSession("kitchen");
+export async function advanceOrderStatus(orderId: string, expectedStatus: string) {
+  const session = await requireStaffSession();
   const admin = createAdminClient();
 
-  const { data: order } = await admin
+  let query = admin
     .from("orders")
     .select("id, status, restaurant_id")
     .eq("id", orderId)
-    .eq("restaurant_id", session.restaurantId)
-    .single();
+    .eq("restaurant_id", session.restaurantId);
+  if (session.branchId) query = query.eq("branch_id", session.branchId);
+  const { data: order } = await query.maybeSingle();
 
-  if (!order) return;
+  if (!order || order.status !== expectedStatus) return;
 
-  const nextStatus = KITCHEN_NEXT_STATUS[order.status];
+  const nextStatus = ORDER_NEXT_STATUS[order.status];
   if (!nextStatus) return;
 
-  await admin.from("orders").update({ status: nextStatus }).eq("id", orderId);
+  const { data: updated, error } = await admin.from("orders")
+    .update({ status: nextStatus }).eq("id", orderId)
+    .eq("restaurant_id", session.restaurantId).eq("status", order.status)
+    .select("id").maybeSingle();
+  if (error) throw new Error("Could not update the order. Please try again.");
+  if (!updated) return;
   await admin.from("order_status_history").insert({
     order_id: orderId,
     status: nextStatus,
@@ -35,29 +41,33 @@ export async function advanceOrderStatus(orderId: string) {
   });
 
   revalidatePath("/staff/kitchen");
+  revalidatePath("/staff/orders");
 }
 
 /**
- * Waiter picks up a ready order and takes it to the table.
- *
- * Kitchen's last step is "ready" — without this the order would sit there
- * forever, since nothing else advances it to "served" (PRD section 22).
+ * Operational staff serve a ready order without closing its table session.
  */
 export async function markOrderServed(orderId: string) {
-  const session = await requireStaffSession("waiter");
+  const session = await requireStaffSession();
   const admin = createAdminClient();
 
-  const { data: order } = await admin
+  let query = admin
     .from("orders")
     .select("id, status, table_session_id")
     .eq("id", orderId)
     .eq("restaurant_id", session.restaurantId)
-    .eq("status", "ready")
-    .maybeSingle();
+    .eq("status", "ready");
+  if (session.branchId) query = query.eq("branch_id", session.branchId);
+  const { data: order } = await query.maybeSingle();
 
   if (!order) return;
 
-  await admin.from("orders").update({ status: "served" }).eq("id", orderId);
+  const { data: updated, error } = await admin.from("orders")
+    .update({ status: "served" }).eq("id", orderId)
+    .eq("restaurant_id", session.restaurantId).eq("status", "ready")
+    .select("id").maybeSingle();
+  if (error) throw new Error("Could not serve the order. Please try again.");
+  if (!updated) return;
   await admin.from("order_status_history").insert({
     order_id: orderId,
     status: "served",
@@ -82,6 +92,7 @@ export async function markOrderServed(orderId: string) {
   }
 
   revalidatePath("/staff/waiter");
+  revalidatePath("/staff/orders");
 }
 
 export async function resolveWaiterRequest(requestId: string) {

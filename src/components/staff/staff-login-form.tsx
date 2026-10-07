@@ -152,7 +152,7 @@ export function StaffLoginForm({ defaultRestaurantSlug }: { defaultRestaurantSlu
     <Card className="w-full max-w-sm">
       <CardHeader>
         <CardTitle>{restaurant.name}</CardTitle>
-        <CardDescription>Choose your role and enter your PIN.</CardDescription>
+        <CardDescription>Select your assigned role and enter your PIN. All staff use the same Orders screen.</CardDescription>
       </CardHeader>
       <CardContent>
         <form ref={formRef} action={formAction} className="flex flex-col gap-5">

@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { AutoRefresh } from "@/components/auto-refresh";
 import { ReadyOrderCard } from "@/components/staff/ready-order-card";
 import { WaiterRequestCard } from "@/components/staff/waiter-request-card";
@@ -10,9 +12,15 @@ export default async function WaiterPage() {
   const session = await requireStaffSession("waiter");
   const admin = createAdminClient();
 
+  // Restaurant-wide staff have no branchId; still scope table requests to their tenant.
+  const { data: branches } = await admin.from("branches")
+    .select("id")
+    .eq("restaurant_id", session.restaurantId);
+
   let requestQuery = admin
     .from("waiter_requests")
     .select("id, type, restaurant_tables(label)")
+    .in("branch_id", (branches ?? []).map((branch) => branch.id))
     .is("resolved_at", null)
     .order("created_at");
 
@@ -37,6 +45,7 @@ export default async function WaiterPage() {
 
   return (
     <div className="flex min-h-screen flex-col gap-8 bg-muted/20 p-4 sm:p-6">
+      <Link href="/staff/orders" className="text-sm underline">Back to Orders</Link>
       <AutoRefresh intervalMs={4000} />
 
       <div className="flex items-center justify-between">

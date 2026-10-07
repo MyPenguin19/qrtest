@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import QRCode from "qrcode";
 
 import { AutoRefresh } from "@/components/auto-refresh";
@@ -55,6 +57,7 @@ export default async function CashierPage() {
 
   return (
     <div className="flex min-h-screen flex-col gap-6 bg-muted/20 p-4 sm:p-6">
+      <Link href="/staff/orders" className="text-sm underline">Back to Orders</Link>
       <AutoRefresh intervalMs={5000} />
       <div className="flex items-center justify-between">
         <div>

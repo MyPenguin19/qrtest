@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export type StaffSession = {
   staffId: string;
@@ -46,14 +47,27 @@ export function verifyStaffSession(token: string | undefined): StaffSession | nu
   }
 }
 
-/** Reads and verifies the staff session cookie; redirects to /staff if missing/invalid/wrong role. */
+/** A missing role requirement allows order operations, never owner/admin access. */
 export async function requireStaffSession(
-  expectedRole: "waiter" | "kitchen" | "cashier",
+  expectedRole?: "waiter" | "kitchen" | "cashier",
 ): Promise<StaffSession> {
   const cookieStore = await cookies();
   const session = verifyStaffSession(cookieStore.get(STAFF_SESSION_COOKIE)?.value);
 
-  if (!session || session.role !== expectedRole) {
+  if (!session || !["waiter", "kitchen", "cashier"].includes(session.role) ||
+      (expectedRole && session.role !== expectedRole)) {
+    redirect("/staff");
+  }
+
+  // A signed cookie must not outlive a disabled account or a changed assignment.
+  const admin = createAdminClient();
+  const { data: staff } = await admin.from("staff")
+    .select("id, role, branch_id")
+    .eq("id", session.staffId)
+    .eq("restaurant_id", session.restaurantId)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (!staff || staff.role !== session.role || staff.branch_id !== session.branchId) {
     redirect("/staff");
   }
 
