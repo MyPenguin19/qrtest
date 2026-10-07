@@ -1,8 +1,7 @@
 import { cn } from "@/lib/utils";
 
 const STEPS = [
-  { status: "pending", label: "Received" },
-  { status: "accepted", label: "Accepted" },
+  { status: "pending", label: "New" },
   { status: "preparing", label: "Preparing" },
   { status: "ready", label: "Ready" },
   { status: "served", label: "Served" },
@@ -13,7 +12,7 @@ export function OrderStatusStepper({ status }: { status: string }) {
     return <p className="text-sm font-medium text-destructive">This order was cancelled.</p>;
   }
 
-  const currentIndex = STEPS.findIndex((s) => s.status === status);
+  const currentIndex = STEPS.findIndex((s) => s.status === (status === "accepted" ? "pending" : status));
   const effectiveIndex = status === "completed" ? STEPS.length - 1 : currentIndex;
 
   return (

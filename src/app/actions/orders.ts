@@ -1,5 +1,8 @@
 "use server";
 
+import { raiseBillForTable } from "@/lib/table-bill";
+import { customerTabUrl, findActiveTableSession, signCustomerTab, validateCustomerTab } from "@/lib/customer-tab";
+
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type PlaceOrderLine = {
@@ -14,13 +17,14 @@ export type PlaceOrderInput = {
   restaurantSlug: string;
   branchSlug: string;
   tableId?: string;
+  tableSessionToken?: string;
   lines: PlaceOrderLine[];
   couponCode?: string;
   customerName?: string;
   customerPhone?: string;
 };
 
-export type PlaceOrderResult = { orderId: string; orderNumber: number } | { error: string };
+export type PlaceOrderResult = { orderId: string; orderNumber: number; tabUrl?: string } | { error: string };
 
 function round2(n: number) {
   return Math.round(n * 100) / 100;
@@ -187,6 +191,32 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   const serviceChargeAmount = round2(taxableAmount * (restaurant.service_charge_percent / 100));
   const totalAmount = round2(taxableAmount + taxAmount + serviceChargeAmount);
 
+  let tableSessionId: string | null = null;
+  let billRequested = false;
+  if (tableId) {
+    const identity = { restaurantId: restaurant.id, branchId: branch.id, tableId };
+    const activeSession = input.tableSessionToken
+      ? await validateCustomerTab(admin, input.tableSessionToken, identity)
+      : await findActiveTableSession(admin, tableId);
+    if (input.tableSessionToken && !activeSession) {
+      return { error: "This tab is no longer active or does not match this table." };
+    }
+    billRequested = activeSession?.status === "bill_requested";
+    tableSessionId = activeSession?.id ?? null;
+
+    if (!tableSessionId) {
+      const { data: newSession, error } = await admin
+        .from("table_sessions")
+        .insert({ table_id: tableId })
+        .select("id")
+        .single();
+      if (error || !newSession) return { error: "Could not open your table session. Please try again." };
+      tableSessionId = newSession.id;
+    }
+  } else if (input.tableSessionToken) {
+    return { error: "A table is required for this tab." };
+  }
+
   let customerId: string | null = null;
   if (input.customerPhone) {
     const { data: customer } = await admin
@@ -198,27 +228,6 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       .select("id")
       .single();
     customerId = customer?.id ?? null;
-  }
-
-  let tableSessionId: string | null = null;
-  if (tableId) {
-    const { data: openSession } = await admin
-      .from("table_sessions")
-      .select("id")
-      .eq("table_id", tableId)
-      .eq("status", "open")
-      .maybeSingle();
-
-    tableSessionId = openSession?.id ?? null;
-
-    if (!tableSessionId) {
-      const { data: newSession } = await admin
-        .from("table_sessions")
-        .insert({ table_id: tableId })
-        .select("id")
-        .single();
-      tableSessionId = newSession?.id ?? null;
-    }
   }
 
   const { data: order, error: orderError } = await admin
@@ -263,12 +272,22 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   await admin.from("order_status_history").insert({ order_id: order.id, status: "pending" });
 
   if (tableId) {
-    await admin.from("restaurant_tables").update({ status: "order_pending" }).eq("id", tableId);
+    await admin.from("restaurant_tables").update({ status: billRequested ? "bill_requested" : "order_pending" }).eq("id", tableId);
   }
 
   if (couponId) {
     await admin.rpc("increment_coupon_usage", { p_coupon_id: couponId });
   }
 
-  return { orderId: order.id, orderNumber: order.order_number };
+  if (billRequested && tableId && tableSessionId) {
+    const bill = await raiseBillForTable(admin, branch.id, tableId, restaurant.id, tableSessionId);
+    // The order already exists. Do not return an order failure that invites a duplicate retry.
+    if (bill.error) console.error("Could not refresh requested bill after order", order.id);
+  }
+
+  const tabUrl = tableId && tableSessionId ? customerTabUrl(
+    input.restaurantSlug, input.branchSlug, tableId,
+    signCustomerTab({restaurantId: restaurant.id, branchId: branch.id, tableId, sessionId: tableSessionId}),
+  ) : undefined;
+  return { orderId: order.id, orderNumber: order.order_number, tabUrl };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { placeOrder } from "@/app/actions/orders";
 import { useCart } from "@/components/menu/cart-provider";
@@ -15,6 +15,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
   const { lines, updateQuantity, removeLine, subtotal, clear } = useCart();
   const params = useParams<{ restaurant: string; branch: string; table?: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [couponCode, setCouponCode] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -29,6 +30,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
         restaurantSlug: params.restaurant,
         branchSlug: params.branch,
         tableId: params.table,
+        tableSessionToken: searchParams.get("session") || undefined,
         lines: lines.map((l) => ({
           itemId: l.itemId,
           variantId: l.variantId,
@@ -48,7 +50,7 @@ export function CartSheet({ open, onOpenChange }: { open: boolean; onOpenChange:
 
       clear();
       onOpenChange(false);
-      router.push(`/menu/${params.restaurant}/${params.branch}/order/${result.orderId}`);
+      router.push(result.tabUrl ?? `/menu/${params.restaurant}/${params.branch}/order/${result.orderId}`);
     });
   }
 
