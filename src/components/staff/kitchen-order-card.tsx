@@ -8,13 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const ACTION_LABEL: Record<string, string> = {
-  pending: "Start preparing",
-  accepted: "Start preparing",
+  pending: "Mark ready",
+  accepted: "Mark ready",
   preparing: "Mark ready",
   ready: "Mark served",
 };
 
-const STATUS_LABEL: Record<string, string> = { pending: "New", accepted: "New", preparing: "Preparing", ready: "Ready", served: "Served" };
+const STATUS_LABEL: Record<string, string> = { pending: "New", accepted: "New", preparing: "New", ready: "Ready", served: "Served" };
 
 type OrderItem = { id: string; item_name: string; quantity: number };
 

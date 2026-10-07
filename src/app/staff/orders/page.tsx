@@ -19,6 +19,7 @@ export default async function StaffOrdersPage() {
       "id, order_number, status, created_at, order_items(id, item_name, quantity), table_sessions(restaurant_tables(label))",
     )
     .eq("restaurant_id", session.restaurantId)
+    .is("table_session_id", null)
     .in("status", ["pending", "accepted", "preparing", "ready", "served"])
     .order("created_at");
 
@@ -26,7 +27,9 @@ export default async function StaffOrdersPage() {
     query = query.eq("branch_id", session.branchId);
   }
 
-  const [{data:orders},tables] = await Promise.all([query,getDiningTables(session.restaurantId,session.branchId)]);
+  const [{data:orders,error:orderError},tables] = await Promise.all([query,getDiningTables(session.restaurantId,session.branchId)]);
+
+  if (orderError) throw new Error("Could not load orders without a table.");
 
   return (
     <div className="flex min-h-screen flex-col gap-6 bg-muted/20 p-6">
@@ -50,9 +53,16 @@ export default async function StaffOrdersPage() {
         <Link href="/staff/cashier" className="text-sm underline">Bills and payments</Link>
       )}
 
-      <h2 className="text-lg font-semibold">Tables</h2>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{tables.map(table=><DiningTableCard key={table.id} table={table} canPay={session.role === "cashier"}/>)}</div>
-      <h2 className="text-lg font-semibold">Orders</h2>
+      <h2 className="text-lg font-semibold">Active Tables</h2>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {tables.filter(t=>t.sessionId).map(table=><DiningTableCard key={table.sessionId} table={table} canFulfill canPay={session.role === "cashier"}/>)}
+        {!tables.some(t=>t.sessionId) && <p className="text-sm text-muted-foreground">No active tables.</p>}
+      </div>
+      <details>
+        <summary className="cursor-pointer text-sm">Available tables ({tables.filter(t=>!t.sessionId).length})</summary>
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{tables.filter(t=>!t.sessionId).map(table=><DiningTableCard key={table.id} table={table}/>)}</div>
+      </details>
+      {(orders?.length ?? 0) > 0 && <h2 className="text-lg font-semibold">Orders without a table</h2>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {(orders ?? []).map((order) => (
           <KitchenOrderCard
@@ -69,9 +79,7 @@ export default async function StaffOrdersPage() {
             }}
           />
         ))}
-        {(!orders || orders.length === 0) && (
-          <p className="text-sm text-muted-foreground">No active orders. New orders will appear here instantly.</p>
-        )}
+
       </div>
     </div>
   );

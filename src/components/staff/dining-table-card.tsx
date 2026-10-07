@@ -2,34 +2,27 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { changeDiningSession } from "@/app/actions/dining";
-import type { DiningTable } from "@/lib/dining-tables";
+import { tableAttention, type DiningTable } from "@/lib/dining-view";
+import { DiningRounds } from "@/components/staff/dining-rounds";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-const LABELS: Record<string, string> = {
-  available: "Available",
-  occupied: "Open",
-  order_pending: "Ordering",
-  preparing: "Ordering",
-  ready: "Ordering",
-  bill_requested: "Bill Requested",
-  payment_pending: "Payment Pending",
-  paid: "Paid / Closing",
-  cleaning: "Cleaning",
-};
 export function DiningTableCard({
   table,
   owner = false,
   canPay = false,
+  canFulfill = false,
 }: {
   table: DiningTable;
   owner?: boolean;
   canPay?: boolean;
+  canFulfill?: boolean;
 }) {
   const router = useRouter(),
     [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null),
     [method, setMethod] = useState("cash");
+  const [detailOpen, setDetailOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [closureReason, setClosureReason] = useState<"external_manual" | "manual_unsettled">("external_manual");
   async function act(action: string) {
@@ -70,39 +63,28 @@ export function DiningTableCard({
     });
   }
   return (
-    <Card>
+    <Card data-table-id={table.id} data-session-id={table.sessionId ?? undefined}>
       <CardContent className="flex flex-col gap-3 pt-6">
         <div className="flex justify-between">
           <p className="font-medium">Table {table.label}</p>
-          <p>{LABELS[table.status] ?? table.status}</p>
+          <p className="font-medium">{tableAttention(table)}</p>
         </div>
+        <p className="text-xs text-muted-foreground">{table.branchName}{table.sessionId ? ` · Open ${table.ageMinutes} min` : ""}</p>
         {table.sessionId && (
           <>
-            <p className="text-sm">
-              {table.orderCount} submitted orders · ₹{table.total.toFixed(2)}
-            </p>
-            {table.paymentIntent === "counter" && <p className="text-sm font-medium">Customer intends to pay at counter</p>}
-            {table.orders.length > 0 && (
-              <details>
-                <summary className="cursor-pointer text-sm">
-                  View orders
-                </summary>
-                {table.orders.map((o) => (
-                  <p key={o.number} className="text-sm">
-                    Order #{o.number} · {o.status}
-                  </p>
-                ))}
-              </details>
-            )}
-            {table.sessionStatus === "open" && (
-              <Button
-                disabled={pending}
-                variant="outline"
-                onClick={() => act("request_bill")}
-              >
-                Request bill
-              </Button>
-            )}
+            {table.paymentIntent === "counter" && <p className="rounded border p-2 text-sm font-semibold" role="status">PAY AT COUNTER</p>}
+            <DiningRounds orders={table.orders} canFulfill={canFulfill}/>
+            <p className="flex justify-between border-t pt-3 font-semibold"><span>Running total</span><span>₹{table.total.toFixed(2)}</span></p>
+            <Button variant="outline" onClick={()=>setDetailOpen(true)}>View Tab</Button>
+            <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+              <DialogContent>
+                <DialogHeader><DialogTitle>Table {table.label} · {tableAttention(table)}</DialogTitle><DialogDescription>{table.branchName} · Open {table.ageMinutes} minutes · Actions apply to a whole order round.</DialogDescription></DialogHeader>
+                <DiningRounds orders={table.orders} canFulfill={canFulfill} expanded/>
+                <p className="font-semibold">Running total: ₹{table.total.toFixed(2)}</p>
+                <p>Payment: {table.paymentIntent === "counter" ? "Pay at Counter" : table.sessionStatus === "payment_pending" ? "Pending with staff" : table.sessionStatus === "paid" ? "Recorded by staff" : "No customer payment choice"}</p>
+                {canPay && ["open","bill_requested"].includes(table.sessionStatus ?? "") && <Button onClick={()=>{setDetailOpen(false);setManualOpen(true);}}>Close Tab</Button>}
+              </DialogContent>
+            </Dialog>
             {table.sessionStatus === "open" && table.orderCount === 0 && (
               <Button
                 disabled={pending}
@@ -112,7 +94,7 @@ export function DiningTableCard({
                 Reset empty table
               </Button>
             )}
-            {canPay && table.sessionStatus === "bill_requested" && (
+            {canPay && ["open","bill_requested"].includes(table.sessionStatus ?? "") && (
               <>
                 <label className="text-sm">
                   Counter payment method
@@ -153,9 +135,9 @@ export function DiningTableCard({
                 </Button>
               </>
             )}
-            {canPay && ["open", "bill_requested"].includes(table.sessionStatus ?? "") && (
+            {canPay && ["open", "bill_requested", "paid"].includes(table.sessionStatus ?? "") && (
               <>
-                <Button disabled={pending} variant="outline" onClick={() => {setError(null);setManualOpen(true);}}>Close table manually</Button>
+                <Button disabled={pending} variant="outline" onClick={() => {setError(null);setManualOpen(true);}}>Close Tab</Button>
                 <Dialog open={manualOpen} onOpenChange={setManualOpen}>
                   <DialogContent>
                     <DialogHeader>
@@ -163,24 +145,20 @@ export function DiningTableCard({
                       <DialogDescription>This ends the visit and locks further ordering. The orders and final tab are kept. QR.CR does not verify an external payment.</DialogDescription>
                     </DialogHeader>
                     <p>Current total: ₹{table.total.toFixed(2)}</p>
-                    <label className="text-sm">Closure reason
+                    {table.sessionStatus !== "paid" && <label className="text-sm">Closure reason
                       <select className="ml-2 rounded border p-2" value={closureReason} disabled={pending} onChange={e=>setClosureReason(e.target.value as typeof closureReason)}>
                         <option value="external_manual">Payment handled outside QR.CR</option>
                         <option value="manual_unsettled">Clear table without recording payment</option>
                       </select>
-                    </label>
-                    <Button disabled={pending} onClick={()=>act("manual_close")}>Confirm manual closure</Button>
+                    </label>}
+                    <Button disabled={pending} onClick={()=>act(table.sessionStatus === "paid" ? "close" : "manual_close")}>{table.sessionStatus === "paid" ? "Confirm closure" : "Confirm manual closure"}</Button>
                     <Button variant="outline" disabled={pending} onClick={()=>setManualOpen(false)}>Keep table open</Button>
                     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
                   </DialogContent>
                 </Dialog>
               </>
             )}
-            {canPay && table.sessionStatus === "paid" && (
-              <Button disabled={pending} onClick={() => act("close")}>
-                Close paid table
-              </Button>
-            )}
+
           </>
         )}
         {error && (

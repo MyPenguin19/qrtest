@@ -6,8 +6,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { requireStaffSession } from "@/lib/staff-session";
 
 const ORDER_NEXT_STATUS: Record<string, string> = {
-  pending: "preparing",
-  accepted: "preparing",
+  pending: "ready",
+  accepted: "ready",
   preparing: "ready",
 };
 

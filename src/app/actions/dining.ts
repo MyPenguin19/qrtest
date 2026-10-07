@@ -47,6 +47,7 @@ export async function changeDiningSession(input: {
   closureReason?: "external_manual" | "manual_unsettled";
 }) {
   const admin = createAdminClient();
+  let paymentAuthorized = false;
   let restaurantId: string,
     branchId: string | null = null,
     staffId: string | null = null,
@@ -55,6 +56,7 @@ export async function changeDiningSession(input: {
     const owner = await requireCurrentRestaurant();
     if (!["owner", "manager"].includes(owner.role))
       return { error: "Owner or manager access is required." };
+    paymentAuthorized = true;
     restaurantId = owner.restaurantId;
     const {
       data: { user },
@@ -62,6 +64,7 @@ export async function changeDiningSession(input: {
     userId = user!.id;
   } else {
     const staff = await requireStaffSession();
+    paymentAuthorized = staff.role === "cashier";
     restaurantId = staff.restaurantId;
     branchId = staff.branchId;
     staffId = staff.staffId;
@@ -74,6 +77,20 @@ export async function changeDiningSession(input: {
     .maybeSingle();
   if (!table || (branchId && table.branch_id !== branchId))
     return { error: "Table not found." };
+  if (input.action === "start_payment") {
+    if (!paymentAuthorized) return {error:"Cashier or owner access is required."};
+    const {data: visit,error: visitError} = await admin.from("table_sessions").select("status")
+      .eq("id",input.sessionId).eq("table_id",input.tableId).maybeSingle();
+    if (visitError || !visit) return {error:"Table visit not found."};
+    if (visit.status === "open") {
+      // Retain existing bill/payment operations, without requiring a separate staff click.
+      const {error} = await admin.rpc("dining_transition", {
+        p_restaurant:restaurantId,p_branch:table.branch_id,p_table:input.tableId,p_session:input.sessionId,
+        p_action:"request_bill",p_staff:staffId,p_user:userId,
+      });
+      if(error) return {error:error.message};
+    }
+  }
   const { error } = input.action === "manual_close"
     ? await admin.rpc("dining_manual_close", {
       p_restaurant: restaurantId, p_branch: table.branch_id, p_table: input.tableId,

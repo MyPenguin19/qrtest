@@ -69,7 +69,7 @@ function harness() {
       if(id==='next/headers') return {cookies:async()=>({get:n=>jar.has(n)?{value:jar.get(n)}:undefined,set:(n,v)=>jar.set(n,v),delete:n=>jar.delete(n)})};
       if(id==='next/navigation') return {redirect:p=>{throw new Error('REDIRECT '+p);},notFound:()=>{throw new Error('NOT_FOUND');}};
       if(id==='next/cache') return {revalidatePath:p=>state.revalidated.push(p)};
-      if(id==='@/lib/dining-tables') return {getDiningTables:async()=>[]};
+      if(id==='@/lib/dining-tables') return {getDiningTables:async(restaurant,branch)=>db.restaurant_tables.filter(t=>db.branches.find(b=>b.id===t.branch_id)?.restaurant_id===restaurant&&(!branch||t.branch_id===branch)).map(t=>{const visit=db.table_sessions.find(v=>v.table_id===t.id&&v.status!=='closed');return {...t,sessionId:visit?.id??null,orders:db.orders.filter(o=>visit && o.table_session_id===visit.id)};})};
       if(id==='@/lib/supabase/admin') return {createAdminClient:()=>client};
       if(id==='@/lib/supabase/server') return {createClient:async()=>client};
       if(id==='next/link'||id.startsWith('@/components/')) return new Proxy({default:'Link'}, {get:(o,k)=>o[k]??String(k)});
@@ -93,7 +93,7 @@ function harness() {
   return {db,state,jar,load,login};
 }
 
-for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates staff, one login, seeded order -> Preparing -> Ready -> Served, session stays open`,async()=>{
+for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates staff, one login, seeded order -> Ready -> Served, session stays open`,async()=>{
   const h=harness(), form=new FormData();
   for(const [k,v] of Object.entries({name:'Pat',branchId:'branch-a',role,pin:'1234'})) form.set(k,v);
   assert.equal((await h.load('src/app/actions/staff.ts').addStaff({error:null},form)).error,null);
@@ -112,14 +112,13 @@ for(const role of ['waiter','kitchen','cashier']) test(`${role}: owner creates s
   const board=await h.load('src/app/staff/orders/page.tsx').default();
   assert.match(JSON.stringify(board),new RegExp(order.id));
   const ops=h.load('src/app/actions/staff-ops.ts');
-  await ops.advanceOrderStatus(order.id,'pending');assert.equal(order.status,'preparing');
-  await ops.advanceOrderStatus(order.id,'preparing');assert.equal(order.status,'ready');
+  await ops.advanceOrderStatus(order.id,'pending');assert.equal(order.status,'ready');
   await ops.markOrderServed(order.id);assert.equal(order.status,'served');
   assert.deepEqual({...order,status:original.status},original);
   assert.equal(h.db.table_sessions[0].status,'open');assert.equal(h.db.table_sessions[0].closed_at,null);
   assert.equal(h.db.restaurant_tables[0].status,'occupied');assert.equal(h.db.order_items[0].quantity,2);
   assert.equal(h.db.customers[0].name,'Guest');assert.equal(h.db.bills[0].status,'open');assert.equal(h.db.payments.length,0);
-  assert.deepEqual(h.db.order_status_history.map(r=>r.status),['pending','preparing','ready','served']);
+  assert.deepEqual(h.db.order_status_history.map(r=>r.status),['pending','ready','served']);
   assert.ok(h.db.order_status_history.slice(1).every(r=>r.changed_by_staff_id===staff.id));
   assert.equal(h.jar.get('thaliq_staff_session'),cookie);
 });
@@ -141,10 +140,10 @@ test('stale/repeated actions cannot skip stages or duplicate history; legacy acc
   const ops=h.load('src/app/actions/staff-ops.ts');
   await ops.markOrderServed('order');assert.equal(order.status,'accepted');
   await Promise.all([ops.advanceOrderStatus('order','accepted'),ops.advanceOrderStatus('order','accepted')]);
-  assert.equal(order.status,'preparing');assert.equal(h.db.order_status_history.length,1);
-  await ops.advanceOrderStatus('order','accepted');assert.equal(order.status,'preparing');
+  assert.equal(order.status,'ready');assert.equal(h.db.order_status_history.length,1);
+  await ops.advanceOrderStatus('order','accepted');assert.equal(order.status,'ready');
   await ops.advanceOrderStatus('order','preparing');await ops.markOrderServed('order');await ops.markOrderServed('order');
-  assert.deepEqual(h.db.order_status_history.map(r=>r.status),['preparing','ready','served']);
+  assert.deepEqual(h.db.order_status_history.map(r=>r.status),['ready','served']);
 });
 
 test('missing, tampered, disabled, or reassigned staff sessions are rejected',async()=>{
@@ -252,4 +251,26 @@ test('3.1 Add More Items link retains the original signed session and shows curr
   const token=sign({restaurantId:'A',branchId:'branch-a',tableId:'table-1',sessionId:'active',customerSessionId:'device'});
   const rendered=JSON.stringify(await h.load('src/app/menu/[restaurant]/[branch]/[table]/tab/page.tsx').default({params:Promise.resolve({restaurant:'a',branch:'main',table:'table-1'}),searchParams:Promise.resolve({session:token})}));
   assert.match(rendered,/Add More Items/);assert.ok(rendered.includes('?session='+encodeURIComponent(token)));assert.match(rendered,/25.00/);assert.doesNotMatch(rendered,/Request Bill/);
+});
+
+test('3.2 legacy preparing round still advances to ready and serving does not close the visit',async()=>{
+ const h=harness();await h.login('kitchen');h.db.table_sessions.push({id:'visit',table_id:'table-1',status:'open'});
+ h.db.orders.push({id:'legacy',restaurant_id:'A',branch_id:'branch-a',table_session_id:'visit',status:'preparing'});
+ await h.load('src/app/actions/staff-ops.ts').advanceOrderStatus('legacy','preparing');assert.equal(h.db.orders[0].status,'ready');
+ await h.load('src/app/actions/staff-ops.ts').markOrderServed('legacy');assert.equal(h.db.table_sessions[0].status,'open');assert.deepEqual(h.db.order_status_history.map(x=>x.status),['ready','served']);
+});
+test('3.2 staff board renders one table workspace for multiple rounds and excludes closed history',async()=>{
+ const h=harness();await h.login('cashier');h.db.table_sessions.push({id:'active',table_id:'table-1',status:'open'},{id:'old',table_id:'table-1',status:'closed'});
+ for(const [id,visit] of [['round-one','active'],['round-two','active'],['old-round','old']])h.db.orders.push({id,restaurant_id:'A',branch_id:'branch-a',table_session_id:visit,status:'pending'});
+ const page=JSON.stringify(await h.load('src/app/staff/orders/page.tsx').default());
+ assert.equal((page.match(/"type":"DiningTableCard"/g)||[]).length,1);assert.ok(page.includes('round-one')&&page.includes('round-two'));assert.ok(!page.includes('old-round'));assert.ok(!page.includes('KitchenOrderCard'));
+});
+test('3.2 starting manual payment from open visit internally prepares bill; no customer intent required',async()=>{
+ const h=harness();await h.login('cashier');h.db.table_sessions.push({id:'visit',table_id:'table-1',status:'open'});
+ const result=await h.load('src/app/actions/dining.ts').changeDiningSession({tableId:'table-1',sessionId:'visit',action:'start_payment',attemptKey:'attempt',method:'cash'});
+ assert.equal(result.error,null);assert.deepEqual(h.state.rpcCalls.map(c=>c.args.p_action),['request_bill','start_payment']);
+});
+test('3.2 non-cashier cannot create a bill as a side effect of unauthorized start payment',async()=>{
+ const h=harness();await h.login('kitchen');h.db.table_sessions.push({id:'visit',table_id:'table-1',status:'open'});
+ assert.ok((await h.load('src/app/actions/dining.ts').changeDiningSession({tableId:'table-1',sessionId:'visit',action:'start_payment'})).error);assert.equal(h.state.rpcCalls.length,0);
 });
