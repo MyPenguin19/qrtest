@@ -64,6 +64,7 @@ function harness() {
     }; return query;
   }
   async function rpc(name,args) {
+    if(name==='platform_admin_status')return {data:state.user?.id==='admin'?'allowed':'denied',error:null};
     if(name==='staff_login_begin') {
       const r=db.restaurants.find(r=>r.slug===args.p_slug&&r.status==='active');
       const st=db.staff.find(s=>s.id===args.p_staff&&s.restaurant_id===r?.id&&s.is_active&&['staff','waiter','kitchen','cashier'].includes(s.role));
@@ -103,6 +104,7 @@ function harness() {
     const module = {exports:{}}; cache.set(filename,module);
     const native = createRequire(filename);
     function customRequire(id) {
+      if(id==='server-only') return {};
       if(id==='next/headers') return {cookies:async()=>({get:n=>jar.has(n)?{value:jar.get(n)}:undefined,set:(n,v)=>jar.set(n,v),delete:n=>jar.delete(n)})};
       if(id==='next/navigation') return {redirect:p=>{throw new Error('REDIRECT '+p);},notFound:()=>{throw new Error('NOT_FOUND');}};
       if(id==='next/cache') return {revalidatePath:p=>state.revalidated.push(p)};
@@ -203,10 +205,10 @@ test('staff cookie does not grant owner/admin access; existing owner/admin guard
   const h=harness();await h.login('waiter');h.state.user=null;
   const owner=h.load('src/lib/restaurant.ts'),admin=h.load('src/lib/platform-admin.ts');
   await assert.rejects(owner.requireCurrentRestaurant(),/REDIRECT \/login/);
-  await assert.rejects(admin.requirePlatformAdmin(),/REDIRECT \/login/);
+  await assert.rejects(admin.requirePlatformAdmin(),/REDIRECT \/platform\/login/);
   h.state.user={id:'owner-a'};assert.equal((await owner.requireCurrentRestaurant()).restaurantId,'A');
-  await assert.rejects(admin.requirePlatformAdmin(),/REDIRECT \/dashboard/);
-  h.state.user={id:'admin'};assert.equal((await admin.requirePlatformAdmin()).userId,'admin');
+  await assert.rejects(admin.requirePlatformAdmin(),/REDIRECT \/platform\/access-denied/);
+  h.state.user={id:'admin',email:'admin@example.invalid',email_confirmed_at:'2026-01-01'};assert.equal((await admin.requirePlatformAdmin()).userId,'admin');
 });
 
 test('failed order update leaves history unchanged and reports failure',async()=>{

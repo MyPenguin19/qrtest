@@ -16,7 +16,11 @@ before(async()=>{
     db={query:(...args)=>client.query(...args),exec:sql=>client.query(sql),close:async()=>{client.release();await nativePool.end();}};
   } else db=new PGlite();
   await db.exec(`create schema auth; create table auth.users(id uuid primary key,raw_user_meta_data jsonb,phone text,email text,email_confirmed_at timestamptz); do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role bypassrls; end if; end $$; create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql']) {
+  await db.exec(`alter table auth.users add column is_anonymous boolean default false, add column banned_until timestamptz;
+    create table auth.sessions(id uuid primary key,user_id uuid references auth.users(id),aal text,not_after timestamptz);
+    create table auth.mfa_factors(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),status text);
+    create function auth.jwt() returns jsonb language sql as $$ select coalesce(nullif(current_setting('request.jwt.claims',true),''),'{}')::jsonb $$;`);
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql','20261008111047_platform_admin_foundation.sql']) {
     await db.exec(fs.readFileSync(`supabase/${name.startsWith("202608")?"baseline":"migrations"}/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
@@ -465,4 +469,101 @@ test('3.3 order/history failures roll back together',async()=>{
  try {await assert.rejects(opOrder(token,o.orderId,'pending','ready'),/Injected history failure/);assert.equal((await one('select status from orders where id=$1',[o.orderId])).status,'pending');}
  finally {await db.exec('drop trigger test_block_history on order_status_history; drop function test_block_history();');}
  assert.equal(await opOrder(token,o.orderId,'pending','ready'),true);
+});
+
+// 3.5.1 platform boundary: real SQL authorization; no mocked RLS.
+async function platformFixture() {
+  const id=uuid(),session=uuid();
+  await q("insert into auth.users(id,email,email_confirmed_at) values($1,'fixture@example.invalid',now())",[id]);
+  await q("insert into auth.sessions(id,user_id,aal) values($1,$2,'aal2')",[session,id]);
+  await q("insert into auth.mfa_factors(user_id,status) values($1,'verified')",[id]);
+  return {id,session};
+}
+async function platformAs(f,body,aal='aal2',extra={}) {
+  await q("select set_config('request.jwt.claim.sub',$1,false),set_config('request.jwt.claims',$2,false)",[f?.id??'',JSON.stringify({sub:f?.id,session_id:f?.session,aal,exp:Math.floor(Date.now()/1000)+600,...extra})]);
+  await q('set role authenticated');
+  try{return await body();}finally{await q('reset role');await q("select set_config('request.jwt.claim.sub','',false),set_config('request.jwt.claims','{}',false)");}
+}
+const platformStatus=()=>one('select platform_admin_status() status');
+test('3.5.1 platform: anonymous, owner/manager without authorization and forged metadata denied',async()=>{
+  assert.equal((await platformAs(null,platformStatus)).status,'denied');
+  const f=await platformFixture();
+  assert.equal((await platformAs(f,platformStatus,'aal2',{user_metadata:{role:'super_admin'},app_metadata:{role:'super_admin'}})).status,'denied');
+  await q('set role anon');try{await assert.rejects(platformStatus(),/permission denied/);}finally{await q('reset role');}
+});
+test('3.5.1 platform: controlled provision, AAL2, active session/factor and immediate revocation',async()=>{
+  const f=await platformFixture();await q('select platform_set_admin($1,true)',[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'allowed');
+  assert.equal((await platformAs(f,platformStatus,'aal1')).status,'mfa_required');
+  assert.equal((await platformAs(f,platformStatus,'aal2',{exp:1})).status,'denied');
+  assert.equal((await platformAs(f,platformStatus,'aal2',{session_id:uuid()})).status,'denied');
+  await q("update auth.sessions set aal='aal1' where id=$1",[f.session]);
+  assert.equal((await platformAs(f,platformStatus)).status,'mfa_required');
+  await q("update auth.sessions set aal='aal2' where id=$1",[f.session]);
+  await q('select platform_set_admin($1,false)',[f.id]);await q('select platform_set_admin($1,false)',[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+  assert.equal((await one("select count(*) n from platform_audit_logs where target_id=$1 and action='platform_admin.revoked'",[f.id])).n,1);
+  await q('select platform_set_admin($1,true)',[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'allowed');
+  await q("delete from auth.mfa_factors where user_id=$1",[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'mfa_required');
+  await q('delete from auth.sessions where id=$1',[f.session]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+});
+test('3.5.1 platform: no browser/service-role self-promotion or audit access',async()=>{
+  const f=await platformFixture();
+  for(const role of ['anon','authenticated','service_role']) {
+    await q(`set role ${role}`);
+    try {
+      for(const sql of ["select * from platform_admins","insert into platform_admins(user_id) values(gen_random_uuid())","update platform_admins set is_active=true","delete from platform_admins","select * from platform_audit_logs","insert into platform_audit_logs(action,target_type,result) values('platform_admin.provisioned','platform','success')",`select platform_set_admin('${f.id}',true)`])await assert.rejects(q(sql),/permission denied/);
+    } finally {await q('reset role');}
+  }
+});
+test('3.5.1 platform: verified identity and MFA required for provisioning; audit immutable and transactional',async()=>{
+  const id=uuid();await q('insert into auth.users(id) values($1)',[id]);
+  await assert.rejects(q('select platform_set_admin($1,true)',[id]),/verified/);
+  const f=await platformFixture();
+  await q('begin');await q('select platform_set_admin($1,true)',[f.id]);await q('rollback');
+  assert.equal((await one('select count(*) n from platform_admins where user_id=$1',[f.id])).n,0);
+  assert.equal((await one('select count(*) n from platform_audit_logs where target_id=$1',[f.id])).n,0);
+  await q('select platform_set_admin($1,true)',[f.id]);
+  await assert.rejects(q("update platform_audit_logs set result='denied' where target_id=$1",[f.id]),/append-only/);
+  await assert.rejects(q('delete from platform_audit_logs where target_id=$1',[f.id]),/append-only/);
+  await assert.rejects(q('truncate platform_audit_logs'),/append-only/);
+});
+test('3.5.1 platform: denied audit deduplicates and platform authority cannot bypass restaurant RLS',async()=>{
+  const f=await platformFixture(),r=await fixture();
+  const visit=await join(r);await submit(r,visit);
+  await q('grant update on restaurant_tables to authenticated');
+  await platformAs(f,platformStatus);await platformAs(f,platformStatus);
+  assert.equal((await one("select count(*) n from platform_audit_logs where actor_user_id=$1 and action='platform.access_denied'",[f.id])).n,1);
+  await q('select platform_set_admin($1,true)',[f.id]);
+  await platformAs(f,async()=>{
+    assert.equal((await one('select is_platform_admin() value')).value,false);
+    assert.equal((await one('select count(*) n from orders where restaurant_id=$1',[r.r])).n,0);
+    await q("update restaurant_tables set status='available' where id=$1",[r.t]);
+  });
+  assert.equal((await one('select status from restaurant_tables where id=$1',[r.t])).status,'order_pending');
+});
+
+test('3.5.1 platform: inactive/revoked rows, banned user and expired session independently deny',async()=>{
+  const f=await platformFixture();await q('select platform_set_admin($1,true)',[f.id]);
+  await q('update platform_admins set is_active=false where user_id=$1',[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+  await q('update platform_admins set is_active=true,revoked_at=now() where user_id=$1',[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+  await q('select platform_set_admin($1,true)',[f.id]);
+  await q("update auth.users set banned_until=now()+interval '1 day' where id=$1",[f.id]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+  await q('update auth.users set banned_until=null where id=$1',[f.id]);
+  await q("update auth.sessions set not_after=now()-interval '1 minute' where id=$1",[f.session]);
+  assert.equal((await platformAs(f,platformStatus)).status,'denied');
+});
+
+test('3.5.1 platform: repeated concurrent operator changes produce one provision and one revocation',async()=>{
+  const f=await platformFixture();
+  const run=active=>nativePool?Promise.all([1,2].map(()=>nativePool.query('select platform_set_admin($1,$2)',[f.id,active]))):q('select platform_set_admin($1,$2)',[f.id,active]);
+  await run(true);await run(false);
+  const rows=(await q("select action,count(*) n from platform_audit_logs where target_id=$1 group by action order by action",[f.id])).rows;
+  assert.deepEqual(rows,[{action:'platform_admin.provisioned',n:1},{action:'platform_admin.revoked',n:1}]);
 });
