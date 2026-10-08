@@ -1,0 +1,10 @@
+import React from "react";
+export default function Link({href,children,...props}:{href:string;children:React.ReactNode;className?:string}) {return <a href={href} {...props}>{children}</a>;}
+export async function signOutOwner() {}
+export function notFound():never {throw new Error("Not found");}
+const r={id:"00000000-0000-0000-0000-000000000001",name:"Fixture Café "+"LongName".repeat(10),slug:"fixture-cafe",owner_email:"long.verified.owner.address@example.invalid",created_at:"2026-09-01T10:00:00Z",status:"active",branches:2,active_branches:1,tables:3,dine_in_tables:2,categories:2,menu_items:5,available_items:4,staff_accounts:3,orders:7,cancelled_orders:1,qualifying_orders:6,previous_orders:2,first_order:"2026-09-02T10:00:00Z",last_order:"2026-10-08T10:00:00Z",order_value:43.2,ready:true,readiness:"Receiving orders"};
+const period={start:"2026-10-06T00:00:00Z",end:"2026-10-08T12:00:00Z",inactivity_days:14};
+const trend=[{day:"2026-10-06",signups:0,orders:0,active_restaurants:0,total_restaurants:1},{day:"2026-10-07",signups:1,orders:4,active_restaurants:1,total_restaurants:2},{day:"2026-10-08",signups:0,orders:3,active_restaurants:1,total_restaurants:2}];
+export async function getPlatformOverview(){return {...period,total_restaurants:2,active_restaurants:1,new_restaurants:1,orders:7,cancelled_orders:1,needs_setup:1,active_visits:1,inactive_restaurants:1,repeat_active:1,activated_restaurants:1,first_activations:0,new_cohort_activated:0,activation_rate:50,average_activation_hours:24,invalid_activation_timestamps:0,tables:3,menu_items:5,staff_accounts:3,average_orders_per_active:6,recent_restaurants:[r],trend};}
+export async function getPlatformRestaurants(){return {...period,total:1051,page:1,size:25,rows:new URLSearchParams(location.search).has("empty")?[]:[r]};}
+export async function getPlatformRestaurant(){return {...r,...period,currency:null,timezone:null,active_visits:1,staff_recorded_amount:25.5,staff_recorded_count:2,legacy_paid_count:1,fallback_timestamp_count:1,last_recorded_payment:r.last_order,last_visit:r.last_order,last_completed_order:r.last_order,last_menu_update:r.last_order,trend};}

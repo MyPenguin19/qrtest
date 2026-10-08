@@ -20,7 +20,7 @@ before(async()=>{
     create table auth.sessions(id uuid primary key,user_id uuid references auth.users(id),aal text,not_after timestamptz);
     create table auth.mfa_factors(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),status text);
     create function auth.jwt() returns jsonb language sql as $$ select coalesce(nullif(current_setting('request.jwt.claims',true),''),'{}')::jsonb $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql','20261008111047_platform_admin_foundation.sql']) {
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql','20261008111047_platform_admin_foundation.sql','20261008212741_platform_intelligence.sql']) {
     await db.exec(fs.readFileSync(`supabase/${name.startsWith("202608")?"baseline":"migrations"}/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
