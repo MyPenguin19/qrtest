@@ -110,7 +110,7 @@ export function DiningTableCard({
                   </select>
                 </label>
                 <Button disabled={pending} onClick={() => act("start_payment")}>
-                  Start payment
+                  Record Payment
                 </Button>
               </>
             )}
@@ -118,7 +118,7 @@ export function DiningTableCard({
               <>
                 <p className="text-sm">
                   Confirm only after the full payment has actually been
-                  received.
+                  received. This will also end the table session.
                 </p>
                 <Button
                   disabled={pending}

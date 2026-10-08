@@ -16,7 +16,7 @@ before(async()=>{
     db={query:(...args)=>client.query(...args),exec:sql=>client.query(sql),close:async()=>{client.release();await nativePool.end();}};
   } else db=new PGlite();
   await db.exec(`create schema auth; create table auth.users(id uuid primary key,raw_user_meta_data jsonb,phone text); do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role bypassrls; end if; end $$; create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql']) {
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261007221402_close_confirmed_external_payment.sql']) {
     await db.exec(fs.readFileSync(`supabase/${name.startsWith("202608")?"baseline":"migrations"}/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
@@ -45,12 +45,15 @@ test('A normal meal: scan, two rounds, request, pending, confirmed, closed, avai
   const f=await fixture(),s=await join(f);
   assert.equal((await state(f,s)).table_status,'occupied');
   await submit(f,s);await submit(f,s,uuid(),payload(f,2));
+  await q("update orders set status='served' where table_session_id=$1",[s.sessionId]);
+  const itemsBefore=(await q('select i.* from order_items i join orders o on o.id=i.order_id where o.table_session_id=$1 order by i.id',[s.sessionId])).rows;
   assert.equal((await bill(f,s)).total,15);
   const key=uuid();await action(f,s,'start_payment',key);assert.equal((await state(f,s)).status,'payment_pending');
   assert.equal((await one('select count(*) n from payments where restaurant_id=$1 and status=\'paid\'',[f.r])).n,0);
-  await action(f,s,'confirm_payment',key);assert.equal((await state(f,s)).status,'paid');
-  await action(f,s,'close');const end=await state(f,s);assert.equal(end.table_status,'available');assert.equal(end.status,'closed');
+  await action(f,s,'confirm_payment',key);const end=await state(f,s);assert.equal(end.table_status,'available');assert.equal(end.status,'closed');
   for(const k of ['closed_at','paid_at','bill_requested_at','payment_started_at'])assert.ok(end[k]);
+  assert.deepEqual((await q('select i.* from order_items i join orders o on o.id=i.order_id where o.table_session_id=$1 order by i.id',[s.sessionId])).rows,itemsBefore);
+  assert.equal((await one("select count(*) n from order_status_history h join orders o on o.id=h.order_id where o.table_session_id=$1 and h.status='completed'",[s.sessionId])).n,2);
   assert.equal((await one('select count(*) n from orders where table_session_id=$1',[s.sessionId])).n,2);
   assert.equal((await one('select count(*) n from order_items i join orders o on o.id=i.order_id where o.table_session_id=$1',[s.sessionId])).n,2);
 });
@@ -289,4 +292,49 @@ test('3.1 legacy page can resume only its original active visit, including at QR
   const b=await join(f,uuid());await assert.rejects(resume(),/session has ended/);
   assert.notEqual(b.sessionId,a.sessionId);
   assert.equal((await one('select count(*) n from customer_sessions where table_session_id=$1',[b.sessionId])).n,1);
+});
+
+test('3.2 cleanup: abandoned, failed and retried pending attempts never close the visit',async()=>{
+  const f=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);
+  const first=uuid();await action(f,s,'start_payment',first);
+  await action(f,s,'start_payment',first); // A repeated start is not a receipt.
+  let row=await state(f,s);assert.equal(row.status,'payment_pending');assert.equal(row.closed_at,null);assert.equal(row.paid_at,null);assert.equal(row.table_status,'payment_pending');
+  await action(f,s,'fail_payment',first);row=await state(f,s);assert.equal(row.status,'bill_requested');assert.equal(row.closed_at,null);
+  await assert.rejects(action(f,s,'confirm_payment',first),/no longer pending/);
+  const retry=uuid();await action(f,s,'start_payment',retry);row=await state(f,s);assert.equal(row.status,'payment_pending');assert.equal(row.closed_at,null);
+  await action(f,s,'confirm_payment',retry);assert.equal((await state(f,s)).status,'closed');
+  assert.equal((await one("select count(*) n from payments where restaurant_id=$1 and status='paid'",[f.r])).n,1);
+});
+test('3.2 cleanup: closure failure rolls back receipt, bill and session; retry closes once',async()=>{
+  const f=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);const key=uuid();await action(f,s,'start_payment',key);
+  await db.exec(`create function test_block_closure() returns trigger language plpgsql as $$ begin if new.status='closed' then raise exception 'Injected closure failure'; end if; return new; end $$; create trigger test_block_closure before update on table_sessions for each row execute function test_block_closure();`);
+  try {
+    await assert.rejects(action(f,s,'confirm_payment',key),/Injected closure failure/);
+    const row=await state(f,s);assert.equal(row.status,'payment_pending');assert.equal(row.paid_at,null);assert.equal(row.closed_at,null);
+    assert.equal((await one('select status,confirmed_at from payments where attempt_key=$1',[key])).status,'pending');
+    assert.equal((await one('select status from bills where table_session_id=$1',[s.sessionId])).status,'requested');
+  } finally { await db.exec('drop trigger test_block_closure on table_sessions; drop function test_block_closure();'); }
+  await action(f,s,'confirm_payment',key);assert.equal((await state(f,s)).status,'closed');
+});
+test('3.2 cleanup: stale receipt retries cannot close the next party or duplicate history',async()=>{
+  const f=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);const key=uuid();await action(f,s,'start_payment',key);await action(f,s,'confirm_payment',key);
+  const old=await state(f,s),history=(await q('select * from order_status_history where order_id in (select id from orders where table_session_id=$1) order by id',[s.sessionId])).rows;
+  const next=await join(f,uuid());await submit(f,next);
+  await action(f,s,'confirm_payment',key);
+  assert.equal((await state(f,next)).status,'open');assert.equal((await state(f,next)).table_status,'order_pending');
+  assert.deepEqual((await state(f,s)).closed_at,old.closed_at);
+  assert.deepEqual((await q('select * from order_status_history where order_id in (select id from orders where table_session_id=$1) order by id',[s.sessionId])).rows,history);
+  assert.equal((await one('select count(*) n from payments where restaurant_id=$1',[f.r])).n,1);
+});
+test('3.2 cleanup: confirmation denies foreign tenant, branch, and kitchen staff',async()=>{
+  const f=await fixture(),foreign=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);const key=uuid();await action(f,s,'start_payment',key);
+  await assert.rejects(action(f,s,'confirm_payment',key,foreign.staff),/not authorized/);
+  await assert.rejects(action(f,s,'confirm_payment',key,null,foreign.u),/not authorized/);
+  const otherBranch=uuid();await q("insert into branches(id,restaurant_id,slug,name) values($1,$2,'other','Other')",[otherBranch,f.r]);
+  await q('update staff set branch_id=$1 where id=$2',[otherBranch,f.staff]);
+  await assert.rejects(action(f,s,'confirm_payment',key),/not authorized/);
+  await q("update staff set branch_id=$1,role='kitchen' where id=$2",[f.b,f.staff]);
+  await assert.rejects(action(f,s,'confirm_payment',key),/not authorized/);
+  assert.equal((await state(f,s)).status,'payment_pending');
+  await action(f,s,'confirm_payment',key,null,f.u);assert.equal((await state(f,s)).status,'closed');
 });

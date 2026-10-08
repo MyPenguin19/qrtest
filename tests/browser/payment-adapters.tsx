@@ -8,7 +8,11 @@ export async function chooseCounterPayment(restaurant:string, branch:string, tab
 }
 export async function changeDiningSession(input:unknown) {
   const result = await (await fetch('/manual', {method:'POST',body:JSON.stringify(input)})).json();
-  if(!result.error && (input as {action:string}).action==='manual_close')window.dispatchEvent(new Event('fixture-close'));
+  if(!result.error) {
+    const {action,attemptKey} = input as {action:string;attemptKey?:string};
+    if(action==='manual_close' || action==='confirm_payment')window.dispatchEvent(new Event('fixture-close'));
+    if(action==='start_payment' || action==='fail_payment')window.dispatchEvent(new CustomEvent('fixture-payment',{detail:{status:action==='start_payment'?'payment_pending':'bill_requested',attemptKey}}));
+  }
   return result;
 }
 

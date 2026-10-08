@@ -17,13 +17,16 @@ function Fixture() {
   }, []);
   const [orders,setOrders] = useState<DiningRound[]>(INITIAL_ORDERS);
   const [closed,setClosed] = useState(false);
+  const [payment,setPayment] = useState({status:'open',attemptKey:null as string|null});
   useEffect(()=>{
     const fulfill = (event:Event)=>{const {orderId,status}=(event as CustomEvent).detail;setOrders(previous=>previous.map(o=>o.id===orderId?{...o,status}:o));};
     const close = ()=>setClosed(true);
+    const pay = (event:Event)=>setPayment((event as CustomEvent).detail);
+    window.addEventListener('fixture-payment',pay);
     window.addEventListener('fixture-fulfill',fulfill);window.addEventListener('fixture-close',close);
-    return ()=>{window.removeEventListener('fixture-fulfill',fulfill);window.removeEventListener('fixture-close',close);};
+    return ()=>{window.removeEventListener('fixture-payment',pay);window.removeEventListener('fixture-fulfill',fulfill);window.removeEventListener('fixture-close',close);};
   },[]);
-  const table = { id:'table', label:'1',branchId:'branch',branchName:'Main',openedAt:'2026-10-07T17:00:00Z',ageMinutes:32, status:'occupied', sessionId:closed?null:'visit-A', sessionStatus:closed?null:'open', paymentIntent:counter?'counter':null, orderCount:closed?0:orders.length, total:closed?0:total, orders:closed?[]:orders, attemptKey:null, method:'cash' };
+  const table = { id:'table', label:'1',branchId:'branch',branchName:'Main',openedAt:'2026-10-07T17:00:00Z',ageMinutes:32, status:'occupied', sessionId:closed?null:'visit-A', sessionStatus:closed?null:payment.status, paymentIntent:counter?'counter':null, orderCount:closed?0:orders.length, total:closed?0:total, orders:closed?[]:orders, attemptKey:payment.attemptKey, method:'cash' };
   return <>
     <CustomerPayment restaurant="a" branch="main" table="table" token="original-signed-visit" total={total} counterIntent={counter} menuUrl="/menu/a/main/table?session=original-signed-visit" />
     <DiningTableCard table={table} canPay canFulfill />
