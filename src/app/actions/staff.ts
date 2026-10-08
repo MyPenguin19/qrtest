@@ -1,73 +1,32 @@
 "use server";
-
 import { revalidatePath } from "next/cache";
-
 import { requireCurrentRestaurant } from "@/lib/restaurant";
-import { hashPin, verifyPin } from "@/lib/staff-pin";
+import { hashPin, validNewPin } from "@/lib/staff-pin";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+export type StaffActionState = { error: string | null; success?: boolean };
 
-export type StaffActionState = { error: string | null };
-
-/**
- * PIN accounts are for floor roles only.
- *
- * "manager" is deliberately absent even though PRD section 7 lists it on the
- * PIN screen: a manager's job (menu, staff, analytics — section 39) lives in
- * the Supabase-Auth dashboard, which a PIN session cannot reach. Offering it
- * here would create accounts that can be made but never signed into. Managers
- * get a real email/password account instead.
- */
-const VALID_ROLES = ["waiter", "kitchen", "cashier"];
-
-export async function addStaff(
-  _prevState: StaffActionState,
-  formData: FormData,
-): Promise<StaffActionState> {
-  const branchId = String(formData.get("branchId") ?? "") || null;
-  const name = String(formData.get("name") ?? "").trim();
-  const role = String(formData.get("role") ?? "");
-  const pin = String(formData.get("pin") ?? "");
-
-  if (!name) return { error: "Name is required." };
-  if (!VALID_ROLES.includes(role)) return { error: "Choose a valid role." };
-
-  // Exactly 4 digits: the staff login keypad (PRD section 7's ● ● ● ●) is a
-  // fixed 4-dot pad, so a longer PIN would be impossible to type in.
-  if (!/^\d{4}$/.test(pin)) {
-    return { error: "PIN must be exactly 4 digits." };
-  }
-
+export async function manageStaff(_prev: StaffActionState, form: FormData): Promise<StaffActionState> {
   const restaurant = await requireCurrentRestaurant();
-  const supabase = await createClient();
-
-  // Sign-in matches on restaurant + role + PIN, so two people sharing a PIN
-  // within the same role would be indistinguishable — whoever the query
-  // returned first would get the credit for every order they touch. Reject
-  // the collision at creation rather than mis-attributing work later.
-  const { data: sameRole } = await supabase
-    .from("staff")
-    .select("name, pin_hash")
-    .eq("restaurant_id", restaurant.restaurantId)
-    .eq("role", role)
-    .eq("is_active", true);
-
-  const clash = (sameRole ?? []).find((member) => verifyPin(pin, member.pin_hash));
-  if (clash) {
-    return {
-      error: `${clash.name} already uses that PIN for the ${role} role. Pick a different PIN.`,
-    };
-  }
-
-  const { error } = await supabase.from("staff").insert({
-    restaurant_id: restaurant.restaurantId,
-    branch_id: branchId,
-    name,
-    role,
-    pin_hash: hashPin(pin),
+  if (!["owner","manager"].includes(restaurant.role)) return {error:"Management access required."};
+  const {data:{user}} = await (await createClient()).auth.getUser();
+  if (!user) return {error:"Sign in again."};
+  const action = String(form.get("action") ?? "add");
+  const pin = String(form.get("pin") ?? "");
+  const access = String(form.get("access") ?? "staff");
+  if ((pin || action === "reset_pin" || (action === "add" && access === "staff")) && !validNewPin(pin))
+    return {error:"Use 6–8 digits. Avoid repeated digits and sequences."};
+  const {error} = await createAdminClient().rpc("manage_staff",{
+    p_actor:user.id,p_restaurant:restaurant.restaurantId,p_action:action,
+    p_staff:String(form.get("staffId") ?? "") || null,p_name:String(form.get("name") ?? "").trim(),
+    p_branch:String(form.get("branchId") ?? "") || null,p_access:access,
+    p_pin_hash:pin ? hashPin(pin) : null,p_email:String(form.get("email") ?? "").trim(),
   });
-
-  if (error) return { error: error.message };
-
+  if(error) return {error:error.message};
   revalidatePath("/dashboard/staff");
-  return { error: null };
+  return {error:null,success:true};
+}
+export async function addStaff(prev: StaffActionState, form: FormData) {
+  form.set("action","add");
+  return manageStaff(prev,form);
 }

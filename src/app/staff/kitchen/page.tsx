@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-
-export default function KitchenPage() {
+import { requireStaffSession } from "@/lib/staff-session";
+export default async function LegacyStaffPage() {
+  await requireStaffSession();
   redirect("/staff/orders");
 }

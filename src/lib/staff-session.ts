@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -7,69 +7,26 @@ export type StaffSession = {
   staffId: string;
   restaurantId: string;
   branchId: string | null;
-  role: "owner" | "manager" | "waiter" | "kitchen" | "cashier";
+  role: "staff";
   name: string;
+  restaurantName: string;
+  restaurantSlug: string;
 };
-
 export const STAFF_SESSION_COOKIE = "thaliq_staff_session";
-
-function secret(): string {
-  const value = process.env.STAFF_SESSION_SECRET;
-  if (!value) {
-    throw new Error("STAFF_SESSION_SECRET is not configured");
-  }
-  return value;
+export function staffTokenHash(token: string) {
+  return createHash("sha256").update(token).digest("hex");
 }
-
-/** Signs a staff session into an opaque cookie value: base64(payload).hmac */
-export function signStaffSession(session: StaffSession): string {
-  const payload = Buffer.from(JSON.stringify(session)).toString("base64url");
-  const signature = createHmac("sha256", secret()).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
+export async function currentStaffTokenHash(): Promise<string | null> {
+  const value = (await cookies()).get(STAFF_SESSION_COOKIE)?.value;
+  // Legacy signed cookies intentionally require one fresh PIN sign-in.
+  return value && /^[a-f0-9]{64}$/.test(value) ? staffTokenHash(value) : null;
 }
-
-/** Verifies and decodes a staff session cookie value. Returns null if invalid. */
-export function verifyStaffSession(token: string | undefined): StaffSession | null {
-  if (!token) return null;
-
-  const [payload, signature] = token.split(".");
-  if (!payload || !signature) return null;
-
-  const expected = createHmac("sha256", secret()).update(payload).digest("base64url");
-  const a = Buffer.from(signature);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-
-  try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-/** A missing role requirement allows order operations, never owner/admin access. */
-export async function requireStaffSession(
-  expectedRole?: "waiter" | "kitchen" | "cashier",
-): Promise<StaffSession> {
-  const cookieStore = await cookies();
-  const session = verifyStaffSession(cookieStore.get(STAFF_SESSION_COOKIE)?.value);
-
-  if (!session || !["waiter", "kitchen", "cashier"].includes(session.role) ||
-      (expectedRole && session.role !== expectedRole)) {
-    redirect("/staff");
-  }
-
-  // A signed cookie must not outlive a disabled account or a changed assignment.
-  const admin = createAdminClient();
-  const { data: staff } = await admin.from("staff")
-    .select("id, role, branch_id")
-    .eq("id", session.staffId)
-    .eq("restaurant_id", session.restaurantId)
-    .eq("is_active", true)
-    .maybeSingle();
-  if (!staff || staff.role !== session.role || staff.branch_id !== session.branchId) {
-    redirect("/staff");
-  }
-
-  return session;
+/** Legacy route arguments no longer split operational permissions. */
+export async function requireStaffSession(_legacyRole?: "waiter" | "kitchen" | "cashier"): Promise<StaffSession> {
+  void _legacyRole;
+  const token = await currentStaffTokenHash();
+  if (!token) redirect("/staff");
+  const { data, error } = await createAdminClient().rpc("staff_session_check", { p_token_hash: token });
+  if (error || !data) redirect("/staff");
+  return data as StaffSession;
 }

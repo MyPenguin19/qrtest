@@ -32,7 +32,7 @@ export function StaffLoginCard({
         <p className="text-sm text-muted-foreground">
           Have each staff member scan this once on their phone, then &ldquo;Add to Home
           screen&rdquo;. The device remembers your restaurant — after that they only tap their
-          role and PIN.
+          name and PIN.
         </p>
 
         <div className="flex flex-col gap-1.5">

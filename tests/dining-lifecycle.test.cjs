@@ -15,8 +15,8 @@ before(async()=>{
     const client=await nativePool.connect();
     db={query:(...args)=>client.query(...args),exec:sql=>client.query(sql),close:async()=>{client.release();await nativePool.end();}};
   } else db=new PGlite();
-  await db.exec(`create schema auth; create table auth.users(id uuid primary key,raw_user_meta_data jsonb,phone text); do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role bypassrls; end if; end $$; create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql']) {
+  await db.exec(`create schema auth; create table auth.users(id uuid primary key,raw_user_meta_data jsonb,phone text,email text,email_confirmed_at timestamptz); do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role bypassrls; end if; end $$; create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;`);
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql']) {
     await db.exec(fs.readFileSync(`supabase/${name.startsWith("202608")?"baseline":"migrations"}/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
@@ -186,9 +186,9 @@ test('cancelled orders are excluded from the bill and payment amount',async()=>{
   assert.equal((await bill(f,s)).total,5);const k=uuid();await action(f,s,'start_payment',k);
   assert.equal((await one('select amount from payments where attempt_key=$1',[k])).amount,'5.00');
 });
-test('disabled restaurant and operational staff cannot initiate financial confirmation',async()=>{
+test('disabled restaurant rejects joining; PIN manager records cannot initiate financial confirmation',async()=>{
   const f=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);
-  await q("update staff set role='kitchen' where id=$1",[f.staff]);await assert.rejects(action(f,s,'start_payment',uuid()),/not authorized/);
+  await q("update staff set role='manager' where id=$1",[f.staff]);await assert.rejects(action(f,s,'start_payment',uuid()),/not authorized/);
   await q("update restaurants set status='suspended' where id=$1",[f.r]);await assert.rejects(join(f),/unavailable/);
 });
 test('new tables expose no direct customer/cart data and lifecycle RPCs are not public',async()=>{
@@ -254,7 +254,7 @@ test('3.1 manual closure rejects foreign/unauthorized actors and unresolved paym
   const a=await fixture(),b=await fixture(),s=await join(a);await submit(a,s);
   await assert.rejects(manual(a,s,'external_manual',b.staff),/not authorized/);
   await assert.rejects(manual(a,s,'external_manual',null,b.u),/not authorized/);
-  await q("update staff set role='kitchen' where id=$1",[a.staff]);await assert.rejects(manual(a,s),/not authorized/);
+  await q("update staff set role='manager' where id=$1",[a.staff]);await assert.rejects(manual(a,s),/not authorized/);
   await q("update staff set role='cashier' where id=$1",[a.staff]);await bill(a,s);await action(a,s,'start_payment',uuid());await assert.rejects(manual(a,s),/Resolve the pending/);
 });
 test('3.1 manual clear preserves unpaid truth and allows owner closure after bill request',async()=>{
@@ -326,15 +326,143 @@ test('3.2 cleanup: stale receipt retries cannot close the next party or duplicat
   assert.deepEqual((await q('select * from order_status_history where order_id in (select id from orders where table_session_id=$1) order by id',[s.sessionId])).rows,history);
   assert.equal((await one('select count(*) n from payments where restaurant_id=$1',[f.r])).n,1);
 });
-test('3.2 cleanup: confirmation denies foreign tenant, branch, and kitchen staff',async()=>{
+test('3.2 cleanup: confirmation denies foreign tenant, branch, and PIN manager identities',async()=>{
   const f=await fixture(),foreign=await fixture(),s=await join(f);await submit(f,s);await bill(f,s);const key=uuid();await action(f,s,'start_payment',key);
   await assert.rejects(action(f,s,'confirm_payment',key,foreign.staff),/not authorized/);
   await assert.rejects(action(f,s,'confirm_payment',key,null,foreign.u),/not authorized/);
   const otherBranch=uuid();await q("insert into branches(id,restaurant_id,slug,name) values($1,$2,'other','Other')",[otherBranch,f.r]);
   await q('update staff set branch_id=$1 where id=$2',[otherBranch,f.staff]);
   await assert.rejects(action(f,s,'confirm_payment',key),/not authorized/);
-  await q("update staff set branch_id=$1,role='kitchen' where id=$2",[f.b,f.staff]);
+  await q("update staff set branch_id=$1,role='manager' where id=$2",[f.b,f.staff]);
   await assert.rejects(action(f,s,'confirm_payment',key),/not authorized/);
   assert.equal((await state(f,s)).status,'payment_pending');
   await action(f,s,'confirm_payment',key,null,f.u);assert.equal((await state(f,s)).status,'closed');
+});
+
+// 3.3: real auth/session/operational RPCs, sharing the existing dining fixtures.
+async function staffSession(f,staff=f.staff) {
+  const token=require('node:crypto').randomBytes(32).toString('hex');
+  const row=await one('select auth_version,pin_hash from staff where id=$1',[staff]);
+  assert.equal((await one('select staff_login_finish($1,$2,$3,$4,$5) ok',[f.r,staff,row.auth_version,row.pin_hash,token])).ok,true);
+  return token;
+}
+async function sessionCheck(token,touch=false){return (await one('select staff_session_check($1,$2) actor',[token,touch])).actor;}
+async function opOrder(token,order,expected,next){return (await one('select staff_order_action($1,$2,$3,$4) ok',[token,order,expected,next])).ok;}
+async function opTable(token,f,s,action,key=null){return (await one('select staff_table_action($1,$2,$3,$4,$5) result',[token,f.t,s.sessionId,action,key])).result;}
+async function management(f,act,id=null,access='staff',pin='hash',actor=f.u,email=null){return q('select manage_staff($1,$2,$3,$4,$5,$6,$7,$8,$9)',[actor,f.r,act,id,'Nico',f.b,pin,access,email]);}
+
+test('3.3 A/E: separate revocable devices, PIN reset, deactivate/reactivate and assignment changes invalidate sessions',async()=>{
+ const f=await fixture(),a=await staffSession(f),b=await staffSession(f);
+ assert.equal((await sessionCheck(a)).role,'staff');assert.equal((await sessionCheck(b)).staffId,f.staff);
+ await q('update staff_sessions set revoked_at=now() where token_hash=$1',[a]);assert.equal(await sessionCheck(a),null);assert.ok(await sessionCheck(b));
+ await management(f,'reset_pin',f.staff);assert.equal(await sessionCheck(b),null);
+ const c=await staffSession(f);await management(f,'deactivate',f.staff);assert.equal(await sessionCheck(c),null);
+ assert.equal((await one('select staff_login_begin($1,$2) result',[f.r,f.staff])).result,null);
+ await management(f,'activate',f.staff);assert.equal(await sessionCheck(c),null);
+ const d=await staffSession(f);await management(f,'revoke',f.staff);assert.equal(await sessionCheck(d),null);
+ const e=await staffSession(f);await q('update staff set branch_id=null where id=$1',[f.staff]);assert.equal(await sessionCheck(e),null);
+});
+test('3.3 A: server expiry and inactivity cannot be prolonged by polling or revived by heartbeat',async()=>{
+ const f=await fixture(),token=await staffSession(f);
+ await q("update staff_sessions set last_active_at=now()-interval '20 minutes' where token_hash=$1",[token]);
+ const before=(await one('select last_active_at from staff_sessions where token_hash=$1',[token])).last_active_at;
+ assert.ok(await sessionCheck(token));assert.deepEqual((await one('select last_active_at from staff_sessions where token_hash=$1',[token])).last_active_at,before);
+ assert.ok(await sessionCheck(token,true));
+ await q("update staff_sessions set last_active_at=now()-interval '31 minutes' where token_hash=$1",[token]);assert.equal(await sessionCheck(token,true),null);
+ const other=await staffSession(f);await q("update staff_sessions set expires_at=now()-interval '1 second' where token_hash=$1",[other]);assert.equal(await sessionCheck(other,true),null);
+});
+test('3.3 B/C/D: Nico and Maria operate three rounds and walk-up payment with one shared visit and full attribution',async()=>{
+ const f=await fixture();await management(f,'add');
+ const nico=(await one("select id from staff where restaurant_id=$1 and name='Nico'",[f.r])).id;
+ const maria=uuid();await q("insert into staff(id,restaurant_id,branch_id,name,role,pin_hash) values($1,$2,$3,'Maria','staff','hash')",[maria,f.r,f.b]);
+ const n=await staffSession(f,nico),m=await staffSession(f,maria),s=await join(f);const ids=[];
+ for(const name of ['Coke','Coffee','Pizza']) {
+  await q('update menu_items set name=$1 where id=$2',[name,f.item]);const o=await submit(f,s);ids.push(o.orderId);
+  assert.equal(await opOrder(n,o.orderId,'pending','ready'),true);
+  assert.equal(await opOrder(n,o.orderId,'pending','ready'),false);
+  assert.equal(await opOrder(m,o.orderId,'ready','served'),true);
+ }
+ assert.equal((await state(f,s)).status,'open');
+ assert.deepEqual((await q('select item_name from order_items where order_id=any($1) order by item_name',[ids])).rows.map(x=>x.item_name),['Coffee','Coke','Pizza']);
+ const key=uuid();await opTable(n,f,s,'start_payment',key);assert.equal((await state(f,s)).status,'payment_pending');
+ await assert.rejects(opTable(n,f,s,'close'),/Confirm payment/);await assert.rejects(opTable(n,f,s,'manual_close'),/Unsupported/);
+ await opTable(n,f,s,'confirm_payment',key);await opTable(m,f,s,'confirm_payment',key);
+ const row=await state(f,s);assert.equal(row.status,'closed');assert.equal(row.table_status,'available');
+ assert.equal((await one('select closed_by_staff_id from table_sessions where id=$1',[s.sessionId])).closed_by_staff_id,nico);
+ assert.equal((await one('select recorded_by_staff_id,amount from payments where attempt_key=$1',[key])).recorded_by_staff_id,nico);
+ assert.equal((await one("select count(*) n from order_status_history where order_id=any($1) and status='ready' and changed_by_staff_id=$2",[ids,nico])).n,3);
+ assert.equal((await one("select count(*) n from order_status_history where order_id=any($1) and status='served' and changed_by_staff_id=$2",[ids,maria])).n,3);
+ await assert.rejects(submit(f,s),/Ordering has ended/);
+});
+test('3.3 F/I: token-derived identity rejects foreign orders, tables, branches and management attempts',async()=>{
+ const f=await fixture(),g=await fixture(),token=await staffSession(f),s=await join(g),o=await submit(g,s);
+ await assert.rejects(opOrder(token,o.orderId,'pending','ready'),/Order not found/);
+ await assert.rejects(opTable(token,g,s,'start_payment',uuid()),/Table not found/);
+ await assert.rejects(management(f,'add',null,'staff','hash',g.u),/Management access/);
+ await assert.rejects(management(f,'add',null,'manager','hash',f.staff),/Management access/);
+ await assert.rejects(management({...f,b:g.b},'add'),/Branch not found/);
+ const local=await join(f),order=await submit(f,local);await q('update staff set is_active=false where id=$1',[f.staff]);
+ await assert.rejects(opOrder(token,order.orderId,'pending','ready'),/session expired/);
+ await assert.rejects(opTable(token,f,local,'start_payment',uuid()),/session expired/);
+});
+test('3.3 J: attempt reservations enforce persistent lockout and do not issue sessions after concurrent reset',async()=>{
+ const f=await fixture();let candidate;
+ for(let i=0;i<5;i++){candidate=(await one('select staff_login_begin($1,$2) r',[f.r,f.staff])).r;assert.equal(candidate.id,f.staff);}
+ assert.equal((await one('select staff_login_begin($1,$2) r',[f.r,f.staff])).r.locked,true);
+ await q("update staff_login_limits set window_start=now()-interval '16 minutes' where scope=$1",['staff:'+f.staff]);
+ assert.equal((await one('select staff_login_begin($1,$2) r',[f.r,f.staff])).r.id,f.staff);
+ await management(f,'reset_pin',f.staff,'staff','new-hash');
+ assert.equal((await one('select staff_login_finish($1,$2,$3,$4,$5) ok',[f.r,f.staff,candidate.auth_version,candidate.pin_hash,'a'.repeat(64)])).ok,false);
+ assert.equal((await one('select count(*) n from staff_sessions where staff_id=$1',[f.staff])).n,0);
+});
+test('3.3 I: only owner assigns verified Manager account, PIN cannot authenticate manager; demotion and deactivation remove membership',async()=>{
+ const f=await fixture(),manager=uuid(),unverified=uuid(),email=uuid()+'@example.test';
+ await q('insert into auth.users(id,email,email_confirmed_at) values($1,$2,now()),($3,$4,null)',[manager,email,unverified,'unverified'+email]);
+ await assert.rejects(management(f,'add',null,'manager',null,f.u,'unverified'+email),/verified email/);
+ await management(f,'add',null,'manager',null,f.u,email);
+ const member=await one('select * from staff where manager_user_id=$1',[manager]);
+ assert.equal((await one('select role from restaurant_members where user_id=$1 and restaurant_id=$2',[manager,f.r])).role,'manager');
+ assert.equal((await one('select staff_login_begin($1,$2) r',[f.r,member.id])).r,null);
+ await assert.rejects(management(f,'add',null,'manager',null,manager,email),/Only the owner/);
+ await management(f,'add',null,'staff','hash',manager);
+ await management(f,'deactivate',member.id);assert.equal((await one('select count(*) n from restaurant_members where user_id=$1 and restaurant_id=$2',[manager,f.r])).n,0);
+ await management(f,'activate',member.id);
+ await management(f,'edit',member.id,'staff','new-pin-hash');
+ assert.equal((await one('select count(*) n from restaurant_members where user_id=$1 and restaurant_id=$2',[manager,f.r])).n,0);
+ assert.equal((await one('select id from staff where id=$1',[member.id])).id,member.id);
+});
+test('3.3 J: new credential/session tables and RPCs are not exposed to public or authenticated roles',async()=>{
+ for(const role of ['anon','authenticated']) {
+  for(const table of ['staff_sessions','staff_login_limits'])assert.equal((await one("select has_table_privilege($1,$2,'SELECT') ok",[role,table])).ok,false);
+  const rows=(await q("select has_function_privilege($1,oid,'EXECUTE') ok from pg_proc where pronamespace='public'::regnamespace and proname in ('staff_login_begin','staff_login_finish','staff_session_check','staff_order_action','staff_table_action','manage_staff')",[role])).rows;
+  assert.equal(rows.length,6);assert.ok(rows.every(r=>!r.ok));
+ }
+});
+if(process.env.DINING_TEST_DATABASE_URL) test('3.3 G: parallel staff tokens update each round/receipt once, with one history entry and one closure',async()=>{
+ const f=await fixture(),a=await staffSession(f),b=await staffSession(f),s=await join(f),o=await submit(f,s);
+ const ready=t=>nativePool.query("select staff_order_action($1,$2,'pending','ready')",[t,o.orderId]);
+ await Promise.all([ready(a),ready(b)]);
+ assert.equal((await one("select count(*) n from order_status_history where order_id=$1 and status='ready'",[o.orderId])).n,1);
+ await opOrder(a,o.orderId,'ready','served');const key=uuid();await opTable(a,f,s,'start_payment',key);
+ const pay=t=>nativePool.query("select staff_table_action($1,$2,$3,'confirm_payment',$4)",[t,f.t,s.sessionId,key]);
+ await Promise.all([pay(a),pay(b)]);
+ assert.equal((await one("select count(*) n from payments where restaurant_id=$1 and status='paid'",[f.r])).n,1);
+ assert.equal((await state(f,s)).status,'closed');
+});
+
+test('3.3 security: operational users cannot read credential hashes through authenticated RLS',async()=>{
+ const f=await fixture();await q("select set_config('request.jwt.claim.sub',$1,false)",[f.staff]);await db.exec('set role authenticated');
+ try {assert.equal((await one('select count(*) n from staff')).n,0);}finally{await db.exec('reset role');}
+});
+test('3.3 session refuses suspended restaurants and foreign or disabled assigned branches',async()=>{
+ const f=await fixture(),t=await staffSession(f);
+ await q("update restaurants set status='suspended' where id=$1",[f.r]);assert.equal(await sessionCheck(t),null);
+ await q("update restaurants set status='active' where id=$1",[f.r]);await q('update branches set is_active=false where id=$1',[f.b]);assert.equal(await sessionCheck(t),null);
+});
+test('3.3 order/history failures roll back together',async()=>{
+ const f=await fixture(),token=await staffSession(f),s=await join(f),o=await submit(f,s);
+ await db.exec("create function test_block_history() returns trigger language plpgsql as $$ begin raise exception 'Injected history failure'; end $$; create trigger test_block_history before insert on order_status_history for each row execute function test_block_history();");
+ try {await assert.rejects(opOrder(token,o.orderId,'pending','ready'),/Injected history failure/);assert.equal((await one('select status from orders where id=$1',[o.orderId])).status,'pending');}
+ finally {await db.exec('drop trigger test_block_history on order_status_history; drop function test_block_history();');}
+ assert.equal(await opOrder(token,o.orderId,'pending','ready'),true);
 });

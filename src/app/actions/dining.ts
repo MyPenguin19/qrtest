@@ -5,7 +5,7 @@ import { getCustomerTableContext, signCustomerTab, verifyCustomerTab } from "@/l
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { requireCurrentRestaurant } from "@/lib/restaurant";
-import { requireStaffSession } from "@/lib/staff-session";
+import { currentStaffTokenHash, requireStaffSession } from "@/lib/staff-session";
 
 export async function joinDiningTable(
   restaurant: string,
@@ -64,7 +64,7 @@ export async function changeDiningSession(input: {
     userId = user!.id;
   } else {
     const staff = await requireStaffSession();
-    paymentAuthorized = staff.role === "cashier";
+    paymentAuthorized = true;
     restaurantId = staff.restaurantId;
     branchId = staff.branchId;
     staffId = staff.staffId;
@@ -77,6 +77,15 @@ export async function changeDiningSession(input: {
     .maybeSingle();
   if (!table || (branchId && table.branch_id !== branchId))
     return { error: "Table not found." };
+  if (!input.owner) {
+    const {error} = await admin.rpc("staff_table_action", {
+      p_token_hash:await currentStaffTokenHash(),p_table:input.tableId,p_session:input.sessionId,
+      p_action:input.action,p_attempt:input.attemptKey ?? null,p_method:input.method ?? "cash",
+    });
+    if(error) return {error:error.message};
+    for(const path of ["/staff/orders","/staff/cashier","/dashboard/tables","/dashboard/orders"]) revalidatePath(path);
+    return {error:null};
+  }
   if (input.action === "start_payment") {
     if (!paymentAuthorized) return {error:"Cashier or owner access is required."};
     const {data: visit,error: visitError} = await admin.from("table_sessions").select("status")

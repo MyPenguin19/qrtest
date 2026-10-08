@@ -1,4 +1,5 @@
-import Link from "next/link";
+import { WaiterRequestCard } from "@/components/staff/waiter-request-card";
+import { StaffActivity } from "@/components/staff/staff-activity";
 import { DiningTableCard } from "@/components/staff/dining-table-card";
 import { getDiningTables } from "@/lib/dining-tables";
 
@@ -29,15 +30,22 @@ export default async function StaffOrdersPage() {
 
   const [{data:orders,error:orderError},tables] = await Promise.all([query,getDiningTables(session.restaurantId,session.branchId)]);
 
+  const {data:branches}=await admin.from("branches").select("id").eq("restaurant_id",session.restaurantId);
+  let requestsQuery=admin.from("waiter_requests").select("id,type,restaurant_tables(label)")
+    .in("branch_id",(branches??[]).map(b=>b.id)).is("resolved_at",null).order("created_at");
+  if(session.branchId) requestsQuery=requestsQuery.eq("branch_id",session.branchId);
+  const {data:requests,error:requestError}=await requestsQuery;
+  if(requestError) throw new Error("Could not load table requests.");
+
   if (orderError) throw new Error("Could not load orders without a table.");
 
   return (
     <div className="flex min-h-screen flex-col gap-6 bg-muted/20 p-6">
-      <AutoRefresh intervalMs={3000} />
+      <AutoRefresh intervalMs={3000} /><StaffActivity/>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Staff / Orders</h1>
-          <p className="text-muted-foreground">{session.name}</p>
+          <h1 className="text-2xl font-semibold">Staff Console</h1>
+          <p className="text-muted-foreground">{session.restaurantName} · Welcome, {session.name}</p>
         </div>
         <form action={staffLogout}>
           <Button type="submit" variant="outline">
@@ -46,22 +54,18 @@ export default async function StaffOrdersPage() {
         </form>
       </div>
 
-      {session.role === "waiter" && (
-        <Link href="/staff/waiter" className="text-sm underline">Table requests</Link>
-      )}
-      {session.role === "cashier" && (
-        <Link href="/staff/cashier" className="text-sm underline">Bills and payments</Link>
-      )}
+      <nav className="flex gap-4 text-sm"><a href="#active-tables">Active Tables</a><a href="#available-tables">Available Tables</a></nav>
 
-      <h2 className="text-lg font-semibold">Active Tables</h2>
+      <h2 id="active-tables" className="text-lg font-semibold">Active Tables</h2>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {tables.filter(t=>t.sessionId).map(table=><DiningTableCard key={table.sessionId} table={table} canFulfill canPay={session.role === "cashier"}/>)}
+        {tables.filter(t=>t.sessionId).map(table=><DiningTableCard key={table.sessionId} table={table} canFulfill canPay/>)}
         {!tables.some(t=>t.sessionId) && <p className="text-sm text-muted-foreground">No active tables.</p>}
       </div>
-      <details>
+      <details id="available-tables">
         <summary className="cursor-pointer text-sm">Available tables ({tables.filter(t=>!t.sessionId).length})</summary>
         <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{tables.filter(t=>!t.sessionId).map(table=><DiningTableCard key={table.id} table={table}/>)}</div>
       </details>
+      {!!requests?.length && <section><h2 className="text-lg font-semibold">Table requests</h2><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{requests.map(request=><WaiterRequestCard key={request.id} request={{id:request.id,type:request.type,tableLabel:(request.restaurant_tables as unknown as {label:string}|null)?.label ?? "—"}}/>)}</div></section>}
       {(orders?.length ?? 0) > 0 && <h2 className="text-lg font-semibold">Orders without a table</h2>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {(orders ?? []).map((order) => (

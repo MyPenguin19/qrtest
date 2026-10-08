@@ -12,3 +12,6 @@ The active migration directory matches project `pixhngrbhiziwapxmqjd` after the 
 The Supabase migration tool assigned application timestamps when the three missing migrations were applied in order. Their SQL contents are unchanged. Filenames now use those actual history versions; the consolidated initial SQL is the exact stored hosted migration. This prevents a future CLI deployment from trying to apply already-present tables/functions again.
 
 The enum migration must commit before the following migration. Apply pending migrations before deploying code that depends on them. Modification 3.2 adds no database migration.
+
+
+Modification 3.3 applied `20261008012009_unified_staff_role` followed by `20261008012015_secure_staff_console`. The enum addition must commit before the staff-console migration uses the new value. These filenames match the hosted migration history; do not replay their earlier local generation timestamps. No table-session/order architecture was replaced.

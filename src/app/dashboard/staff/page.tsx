@@ -19,7 +19,7 @@ export default async function StaffPage() {
     supabase.from("branches").select("id, name").eq("restaurant_id", restaurant.restaurantId),
     supabase
       .from("staff")
-      .select("id, name, role, is_active, branches(name)")
+      .select("id, name, role, branch_id, is_active, branches(name)")
       .eq("restaurant_id", restaurant.restaurantId)
       .order("created_at", { ascending: false }),
   ]);
@@ -28,7 +28,7 @@ export default async function StaffPage() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-semibold">Staff</h1>
-        <p className="text-muted-foreground">Waiters, kitchen and cashier accounts sign in with a role + PIN.</p>
+        <p className="text-muted-foreground">Staff sign in once with their name and PIN. Managers use full account authentication.</p>
       </div>
 
       <Card>
@@ -49,13 +49,12 @@ export default async function StaffPage() {
         <CardHeader>
           <CardTitle className="text-base">Add staff</CardTitle>
           <CardDescription>
-            Floor roles only. Managers need the full dashboard, which a PIN sign-in can&apos;t
-            reach — give them an owner/manager account instead.
+            Create Staff access with a PIN. Owners can assign Manager access to an existing verified email account.
           </CardDescription>
         </CardHeader>
         <CardContent>
           {branches && branches.length > 0 ? (
-            <AddStaffForm branches={branches} />
+            <AddStaffForm branches={branches} owner={restaurant.role === "owner"} />
           ) : (
             <p className="text-sm text-muted-foreground">Create a branch first.</p>
           )}
@@ -68,7 +67,7 @@ export default async function StaffPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {(staff ?? []).map((member) => (
-            <div key={member.id} className="flex items-center justify-between border-b py-2 last:border-0">
+            <div key={member.id} className="flex flex-col gap-3 border-b py-3 last:border-0">
               <div>
                 <p className="font-medium">{member.name}</p>
                 <p className="text-xs text-muted-foreground">
@@ -77,10 +76,11 @@ export default async function StaffPage() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="capitalize">
-                  {member.role}
+                  {["waiter","kitchen","cashier","staff"].includes(member.role) ? "Staff" : member.role}
                 </Badge>
-                {!member.is_active && <Badge variant="destructive">Inactive</Badge>}
+                <Badge variant={member.is_active ? "outline" : "destructive"}>{member.is_active ? "Active" : "Inactive"}</Badge>
               </div>
+              {member.role !== "owner" && (member.role !== "manager" || restaurant.role === "owner") && <details><summary className="cursor-pointer text-sm">Edit / PIN / Access</summary><div className="mt-3"><AddStaffForm branches={branches ?? []} owner={restaurant.role === "owner"} member={member}/></div></details>}
             </div>
           ))}
           {(!staff || staff.length === 0) && (

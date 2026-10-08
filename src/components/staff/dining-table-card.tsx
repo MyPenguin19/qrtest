@@ -82,7 +82,7 @@ export function DiningTableCard({
                 <DiningRounds orders={table.orders} canFulfill={canFulfill} expanded/>
                 <p className="font-semibold">Running total: ₹{table.total.toFixed(2)}</p>
                 <p>Payment: {table.paymentIntent === "counter" ? "Pay at Counter" : table.sessionStatus === "payment_pending" ? "Pending with staff" : table.sessionStatus === "paid" ? "Recorded by staff" : "No customer payment choice"}</p>
-                {canPay && ["open","bill_requested"].includes(table.sessionStatus ?? "") && <Button onClick={()=>{setDetailOpen(false);setManualOpen(true);}}>Close Tab</Button>}
+                {owner && canPay && ["open","bill_requested"].includes(table.sessionStatus ?? "") && <Button onClick={()=>{setDetailOpen(false);setManualOpen(true);}}>Close Tab</Button>}
               </DialogContent>
             </Dialog>
             {table.sessionStatus === "open" && table.orderCount === 0 && (
@@ -135,7 +135,7 @@ export function DiningTableCard({
                 </Button>
               </>
             )}
-            {canPay && ["open", "bill_requested", "paid"].includes(table.sessionStatus ?? "") && (
+            {canPay && (table.sessionStatus === "paid" || (owner && ["open", "bill_requested"].includes(table.sessionStatus ?? ""))) && (
               <>
                 <Button disabled={pending} variant="outline" onClick={() => {setError(null);setManualOpen(true);}}>Close Tab</Button>
                 <Dialog open={manualOpen} onOpenChange={setManualOpen}>

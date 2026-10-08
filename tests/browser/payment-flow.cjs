@@ -63,6 +63,8 @@ const http=require('node:http'),path=require('node:path'),assert=require('node:a
     await card.locator('[data-order-id="round2"]').getByRole('button',{name:'Mark Round Ready'}).click();
     await card.locator('[data-order-id="round2"]').getByRole('button',{name:'Mark Round Served'}).click();
     await card.getByText('Completed (2 rounds)').waitFor();
+    await page.getByRole('button',{name:'Fixture: Staff access'}).click();
+    assert.equal(await card.getByRole('button',{name:'Close Tab',exact:true}).count(),0);
     assert.equal(await card.getByRole('button',{name:'Start payment',exact:true}).count(),0);
     await card.getByLabel('Counter payment method').selectOption('card');
     await card.getByRole('button',{name:'Record Payment',exact:true}).click();
