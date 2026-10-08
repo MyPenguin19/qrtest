@@ -22,11 +22,13 @@ export function DiningTableCard({
     [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null),
     [method, setMethod] = useState("cash");
+  const [notice,setNotice] = useState<string|null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [closureReason, setClosureReason] = useState<"external_manual" | "manual_unsettled">("external_manual");
   async function act(action: string) {
     setError(null);
+    setNotice(null);
     start(async () => {
       try {
         const key = `qrcr_payment:${table.sessionId}`;
@@ -54,6 +56,8 @@ export function DiningTableCard({
             action === "close"
           )
             sessionStorage.removeItem(key);
+          if(action === "confirm_payment") {setNotice("External payment recorded. Table session ended.");window.dispatchEvent(new CustomEvent("staff-payment-recorded",{detail:{label:table.label}}));}
+          if(action === "fail_payment") setNotice("Payment not received. The table remains open; retry when ready.");
           setManualOpen(false);
           router.refresh();
         }
@@ -73,6 +77,7 @@ export function DiningTableCard({
         {table.sessionId && (
           <>
             {table.paymentIntent === "counter" && <p className="rounded border p-2 text-sm font-semibold" role="status">PAY AT COUNTER</p>}
+            {table.paymentState === "failed" && <p role="status" className="text-sm">Payment was not received. This table is still open; use Record Payment to retry.</p>}
             <DiningRounds orders={table.orders} canFulfill={canFulfill}/>
             <p className="flex justify-between border-t pt-3 font-semibold"><span>Running total</span><span>₹{table.total.toFixed(2)}</span></p>
             <Button variant="outline" onClick={()=>setDetailOpen(true)}>View Tab</Button>
@@ -104,9 +109,9 @@ export function DiningTableCard({
                     disabled={pending}
                     onChange={(e) => setMethod(e.target.value)}
                   >
-                    <option value="cash">Cash</option>
-                    <option value="card">Card</option>
-                    <option value="upi">UPI</option>
+                    <option value="cash">Cash — counter</option>
+                    <option value="card">Card — external terminal</option>
+                    <option value="upi">UPI — external transfer</option>
                   </select>
                 </label>
                 <Button disabled={pending} onClick={() => act("start_payment")}>
@@ -118,7 +123,7 @@ export function DiningTableCard({
               <>
                 <p className="text-sm">
                   Confirm only after the full payment has actually been
-                  received. This will also end the table session.
+                  received. {table.method === "card" ? "Card payment is handled by your external terminal, not QR.CR." : table.method === "upi" ? "Verify the transfer in your external payment app." : "Confirm the cash has been received."} This will also end the table session.
                 </p>
                 <Button
                   disabled={pending}
@@ -161,6 +166,7 @@ export function DiningTableCard({
 
           </>
         )}
+        {notice && <p role="status" className="text-sm">{notice}</p>}
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}

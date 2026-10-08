@@ -1,3 +1,5 @@
+import { getDashboardMetrics } from "@/lib/dashboard-metrics";
+import { fulfillmentLabel } from "@/lib/operations-view";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,43 +10,18 @@ export default async function DashboardOverviewPage() {
   const restaurant = await requireCurrentRestaurant();
   const supabase = await createClient();
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
-  const [{ count: pendingOrders }, { count: activeTables }, { data: todayOrders }, { data: recentOrders }] =
-    await Promise.all([
-      supabase
-        .from("orders")
-        .select("id", { count: "exact", head: true })
-        .eq("restaurant_id", restaurant.restaurantId)
-        .in("status", ["pending", "accepted", "preparing"]),
-      supabase
-        .from("restaurant_tables")
-        .select("id, branches!inner(restaurant_id)", { count: "exact", head: true })
-        .eq("branches.restaurant_id", restaurant.restaurantId)
-        .neq("status", "available"),
-      supabase
-        .from("orders")
-        .select("total_amount, status")
-        .eq("restaurant_id", restaurant.restaurantId)
-        .gte("created_at", todayStart.toISOString()),
-      supabase
-        .from("orders")
-        .select("id, order_number, status, total_amount, order_items(item_name, quantity)")
-        .eq("restaurant_id", restaurant.restaurantId)
-        .order("created_at", { ascending: false })
-        .limit(8),
-    ]);
-
-  const todayRevenue = (todayOrders ?? [])
-    .filter((o) => o.status !== "cancelled")
-    .reduce((sum, o) => sum + o.total_amount, 0);
-
+  const [metrics,recent] = await Promise.all([
+    getDashboardMetrics(restaurant.restaurantId),
+    supabase.from("orders").select("id, order_number, status, total_amount, order_items(item_name, quantity)")
+      .eq("restaurant_id",restaurant.restaurantId).order("created_at",{ascending:false}).order("id").limit(8),
+  ]);
+  if(recent.error) throw new Error("Could not load recent orders.");
+  const recentOrders=recent.data;
   const stats = [
-    { label: "Today's Orders", value: todayOrders?.length ?? 0 },
-    { label: "Pending Orders", value: pendingOrders ?? 0 },
-    { label: "Active Tables", value: activeTables ?? 0 },
-    { label: "Today's Revenue", value: `₹${todayRevenue}` },
+    { label: "Today's Orders", value: metrics.todayOrders },
+    { label: "Pending Orders", value: metrics.pendingOrders },
+    { label: "Active Tables", value: metrics.activeTables },
+    { label: "Today's Revenue", value: `₹${metrics.revenue.toFixed(2)}` },
   ];
 
   return (
@@ -70,9 +47,10 @@ export default async function DashboardOverviewPage() {
         ))}
       </div>
 
+      <p className="text-xs text-muted-foreground">Today: midnight to midnight in {metrics.window.timeZone}. Orders count submissions, including cancelled orders. Pending means New rounds on open visits or unassigned orders. Revenue is full successful recorded receipts, including tax/service charges; pending/failed attempts and unpaid orders are excluded. External receipts are staff-reported, not provider-verified.{metrics.legacyCount > 0 ? ` ${metrics.legacyCount} legacy receipt(s) use their creation time because confirmation time is unavailable.` : ""}</p>
       <Card>
         <CardHeader>
-          <CardTitle>Live order feed</CardTitle>
+          <CardTitle>Recent order history</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {(recentOrders ?? []).map((order) => (
@@ -85,7 +63,7 @@ export default async function DashboardOverviewPage() {
               </div>
               <div className="flex items-center gap-3">
                 <span className="font-medium">₹{order.total_amount}</span>
-                <Badge>{order.status}</Badge>
+                <Badge>{fulfillmentLabel(order.status)}</Badge>
               </div>
             </div>
           ))}

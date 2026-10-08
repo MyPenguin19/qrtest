@@ -29,3 +29,11 @@ test('closed sessions never populate available table; a new visit has no prior i
 test('invalid duplicate active visits fail visibly rather than merging dining parties',()=>{
  const r=row();r.table_sessions.push({...r.table_sessions[0],id:'other'});assert.throws(()=>diningTableView(r),/multiple active/);
 });
+
+test('3.4 failed attempts remain visible to other staff; pending retry takes precedence',()=>{
+ const r=row();r.table_sessions[0].status='bill_requested';r.table_sessions[0].bills=[{payments:[{status:'failed',attempt_key:'old',method:'card',created_at:'2026-10-08T12:00:00Z'}]}];
+ let v=diningTableView(r);assert.equal(v.paymentState,'failed');assert.equal(v.attemptKey,null);assert.equal(tableAttention(v),'Payment failed / Retry');
+ r.table_sessions[0].status='payment_pending';r.table_sessions[0].bills[0].payments.push({status:'pending',attempt_key:'new',method:'cash',created_at:'2026-10-08T12:05:00Z'});
+ v=diningTableView(r);assert.equal(v.paymentState,'pending');assert.equal(v.attemptKey,'new');assert.equal(tableAttention(v),'Payment Pending');
+ r.table_sessions[0].status='closed';v=diningTableView(r);assert.equal(v.paymentState,null);assert.equal(tableAttention(v),'Available');
+});

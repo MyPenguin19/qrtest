@@ -1,4 +1,5 @@
 "use client";
+import { fulfillmentLabel } from "@/lib/operations-view";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { advanceOrderStatus, markOrderServed } from "@/app/actions/staff-ops";
@@ -18,12 +19,12 @@ export function DiningRounds({orders, canFulfill = false, expanded = false}: {or
   function renderRound(order: DiningRound) {
     const group = fulfillmentGroup(order.status);
     return <div key={order.id} className="flex flex-col gap-2 rounded border p-3" data-order-id={order.id}>
-      <p className="text-xs text-muted-foreground">Round {order.round} · Order #{order.order_number} · <time dateTime={order.created_at}>{new Date(order.created_at).toISOString().slice(11,16)} UTC</time></p>
+      <p className="text-xs text-muted-foreground">Round {order.round} · Order #{order.order_number} · {fulfillmentLabel(order.status).toUpperCase()} · <time dateTime={order.created_at}>{new Date(order.created_at).toISOString().slice(11,16)} UTC</time></p>
       <ul className="text-sm">{order.order_items.map(item=><li key={item.id}>
         <span>{item.item_name}{item.variant_name ? ` (${item.variant_name})` : ""} × {item.quantity}</span>
         {item.special_instructions && <p className="text-xs text-muted-foreground">{item.special_instructions}</p>}
       </li>)}</ul>
-      {canFulfill && ["new","ready"].includes(group) && <Button disabled={pending} size="sm" onClick={()=>{
+      {canFulfill && ["new","ready"].includes(group) && <Button disabled={pending} className="min-h-11" onClick={()=>{
         setError(null);
         start(async()=>{
           try {
@@ -32,7 +33,7 @@ export function DiningRounds({orders, canFulfill = false, expanded = false}: {or
             router.refresh();
           } catch {setError("Could not update this round. Refresh and try again.");}
         });
-      }}>{group === "new" ? "Mark Round Ready" : "Mark Round Served"}</Button>}
+      }}>{pending ? "Saving…" : group === "new" ? "Mark Round Ready" : "Mark Round Served"}</Button>}
     </div>;
   }
   return <div className="flex flex-col gap-4">

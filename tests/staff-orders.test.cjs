@@ -22,15 +22,18 @@ function harness() {
   const jar = new Map();
   const state = { user: {id: 'owner-a'}, writes: [], revalidated: [], failUpdate: false, id: 0, rpcCalls: [], rpcResult: {error:null} };
   function from(table) {
-    const filters = []; let op = 'select', values, single = false, selection;
+    const filters = []; let op = 'select', values, single = false, selection, selectionOptions, range;
     const query = {
-      select(columns) { selection = columns; return this; },
-      eq(k,v) { filters.push(r => (k === 'branches.restaurant_id' ? db.branches.find(b=>b.id===r.branch_id)?.restaurant_id : r[k]) === v); return this; },
+      select(columns,options) { selection = columns; selectionOptions=options; return this; },
+      eq(k,v) { filters.push(r => (k === 'restaurant_tables.branches.restaurant_id' ? db.branches.find(b=>b.id===db.restaurant_tables.find(t=>t.id===r.table_id)?.branch_id)?.restaurant_id : k === 'branches.restaurant_id' ? db.branches.find(b=>b.id===r.branch_id)?.restaurant_id : r[k]) === v); return this; },
       is(k,v) { filters.push(r => r[k] === v); return this; },
       neq(k,v) { filters.push(r => r[k] !== v); return this; },
       in(k,v) { filters.push(r => v.includes(r[k])); return this; },
       not(k,kind,v) { assert.equal(kind, 'in'); filters.push(r => !v.slice(1,-1).split(',').includes(r[k])); return this; },
       order() { return this; }, limit() { return this; },
+      range(from,to) {range=[from,to];return this;},
+      gte(k,v) {filters.push(r=>r[k]!=null&&r[k]>=v);return this;},
+      lt(k,v) {filters.push(r=>r[k]!=null&&r[k]<v);return this;},
       insert(v) { op = 'insert'; values = v; return this; },
       upsert(v) { op = 'upsert'; values = v; return this; },
       update(v) { op = 'update'; values = v; return this; },
@@ -50,10 +53,12 @@ function harness() {
           } else if(op==='update') rows.forEach(r=>Object.assign(r,values));
           if(op!=='select') state.writes.push({table,op,values:structuredClone(values)});
           if(single && rows.length > 1) return Promise.resolve({data:null,error:{message:'Multiple rows'}}).then(resolve,reject);
-          let data = structuredClone(rows);
+          const count=selectionOptions?.count?rows.length:undefined;
+          let data = structuredClone(range?rows.slice(range[0],range[1]+1):rows);
           if(table==='restaurant_tables' && selection?.includes('branches(')) data=data.map(r=>({...r,branches:db.branches.find(b=>b.id===r.branch_id)}));
           if (table === 'orders' && selection?.includes('order_items(')) data = data.map(r => ({...r, order_items: db.order_items.filter(i=>i.order_id===r.id), table_sessions:{restaurant_tables:{label:'1'}}}));
-          return Promise.resolve({data:single?(data[0]??null):data,error:null}).then(resolve,reject);
+          if(table==='orders' && selection?.includes('table_sessions('))data=data.map(r=>({...r,table_sessions:db.table_sessions.find(v=>v.id===r.table_session_id)??null}));
+          return Promise.resolve({data:single?(data[0]??null):data,count,error:null}).then(resolve,reject);
         } catch(e) { return Promise.reject(e).then(resolve,reject); }
       }
     }; return query;
@@ -333,4 +338,29 @@ test('3.3 new PIN rules and salted hash verification reject weak/malformed input
 test('3.3 legacy staff URLs redirect to one console',async()=>{
  const h=harness();await h.login('waiter');
  for(const route of ['kitchen','waiter','cashier'])await assert.rejects(h.load('src/app/staff/'+route+'/page.tsx').default(),/REDIRECT \/staff\/orders/);
+});
+
+test('3.4 served unassociated history leaves staff console; unfinished legacy and counter orders remain visible',async()=>{
+ const h=harness();await h.login('staff');
+ h.db.orders.push({id:'old-served',order_number:4,status:'served',table_session_id:null,restaurant_id:'A',branch_id:'branch-a'},
+ {id:'legacy-pending',order_number:5,status:'pending',table_session_id:null,restaurant_id:'A',branch_id:'branch-a'},
+ {id:'modern-counter',order_number:6,status:'ready',table_session_id:null,restaurant_id:'A',branch_id:'branch-a',submission_key:'s',customer_session_id:null});
+ const page=JSON.stringify(await h.load('src/app/staff/orders/page.tsx').default());
+ assert.ok(!page.includes('old-served'));assert.ok(page.includes('legacy-pending'));assert.ok(page.includes('modern-counter'));assert.match(page,/needs review/);assert.match(page,/Counter order/);
+ assert.equal(h.db.orders.length,3);
+});
+test('3.4 owner metrics use active visits and confirmed receipts, excluding closed pending history and foreign data',async()=>{
+ const h=harness();h.db.table_sessions.push({id:'closed',table_id:'table-1',status:'closed'},{id:'active',table_id:'table-1',status:'open'});
+ h.db.orders.push({id:'old',restaurant_id:'A',table_session_id:'closed',status:'pending',created_at:'2026-10-08T05:00:00Z',total_amount:800},
+ {id:'current',restaurant_id:'A',table_session_id:'active',status:'pending',created_at:'2026-10-08T05:00:00Z',total_amount:900});
+ h.db.payments.push({id:'receipt',restaurant_id:'A',status:'paid',amount:'20.50',confirmed_at:'2026-10-08T05:00:00Z',created_at:'2026-10-07T01:00:00Z'},
+ {id:'pending',restaurant_id:'A',status:'pending',amount:200,confirmed_at:null,created_at:'2026-10-08T06:00:00Z'},
+ {id:'foreign',restaurant_id:'B',status:'paid',amount:999,confirmed_at:'2026-10-08T05:00:00Z',created_at:'2026-10-08T05:00:00Z'});
+ const metrics=await h.load('src/lib/dashboard-metrics.ts').getDashboardMetrics('A',new Date('2026-10-08T12:00:00Z'));
+ assert.equal(metrics.activeTables,1);assert.equal(metrics.pendingOrders,1);assert.equal(metrics.todayOrders,2);assert.equal(metrics.revenue,20.5);
+});
+test('3.4 owner history pagination retains older served orders beyond the first 50',async()=>{
+ const h=harness();for(let i=0;i<55;i++)h.db.orders.push({id:'history-'+i,order_number:i,status:'served',restaurant_id:'A',created_at:'2026-10-07T12:00:00Z',total_amount:5});
+ const page=JSON.stringify(await h.load('src/app/dashboard/orders/page.tsx').default({searchParams:Promise.resolve({page:'2'})}));
+ assert.match(page,/history-54/);assert.match(page,/Newer orders/);assert.ok(!page.includes('Older orders'));assert.equal(h.db.orders.length,55);
 });
