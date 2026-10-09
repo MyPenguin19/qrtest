@@ -21,7 +21,7 @@ before(async()=>{
     create table auth.mfa_amr_claims(session_id uuid,authentication_method text,created_at timestamptz default now(),updated_at timestamptz default now());
     create table auth.mfa_factors(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),status text);
     create function auth.jwt() returns jsonb language sql as $$ select coalesce(nullif(current_setting('request.jwt.claims',true),''),'{}')::jsonb $$;`);
-  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql','20261008111047_platform_admin_foundation.sql','20261008212741_platform_intelligence.sql','20261009022449_platform_controls.sql']) {
+  for(const name of ['20260814000001_extensions_and_enums.sql','20260814000002_core_schema.sql','20260814000003_rls_policies.sql','20261007213147_dining_lifecycle_states.sql','20261007213159_atomic_dining_lifecycle.sql','20261007213210_optional_customer_payment.sql','20261008010236_close_confirmed_external_payment.sql','20261008012009_unified_staff_role.sql','20261008012015_secure_staff_console.sql','20261008111047_platform_admin_foundation.sql','20261008212741_platform_intelligence.sql','20261009022449_platform_controls.sql','20261009101545_membership_owner_boundary.sql']) {
     await db.exec(fs.readFileSync(`supabase/${name.startsWith("202608")?"baseline":"migrations"}/${name}`,'utf8').replace(/create extension[^;]+;/g,''));
     if(name==='20260814000003_rls_policies.sql') await db.exec('grant usage on schema public,auth to authenticated,anon,service_role; grant select on all tables in schema public to authenticated;');
   }
@@ -247,4 +247,84 @@ test('3.5.3 serialization: account retries, opposite actions and new-work bounda
  const newOrder=nativePool.query("insert into orders(restaurant_id,branch_id,status,total_amount) values($1,$2,'pending',5)",[second.r,second.b]);
  const denied=assert.rejects(newOrder,/temporarily unavailable/);await admin.query('commit');admin.release();await denied;
  await q('begin');
+});
+
+// Regression for the previously reproduced direct Manager-to-Owner escalation.
+test('FINAL ACCEPTANCE manager must not promote self through direct membership update',async()=>{
+ const t=await tenant('ManagerBoundary'),session=uuid();
+ await q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'manager')",[t.r,t.u]);
+ await q("insert into auth.sessions(id,user_id,aal) values($1,$2,'aal1')",[session,t.u]);
+ await asActor({id:t.u,session},async()=>{
+  await q("update restaurant_members set role='owner' where restaurant_id=$1 and user_id=$2",[t.r,t.u]);
+ },'aal1');
+ assert.equal((await one('select role from restaurant_members where restaurant_id=$1 and user_id=$2',[t.r,t.u])).role,'manager','Manager must remain Manager after direct Data API-equivalent update');
+});
+
+async function roleFixture(){
+ const t=await tenant('RoleHotfix'),manager=uuid(),other=uuid();
+ await q('insert into auth.users(id) values($1),($2)',[manager,other]);
+ await q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'owner'),($1,$3,'manager')",[t.r,t.u,manager]);
+ return {...t,manager,other};
+}
+test('HOTFIX manager cannot INSERT, UPSERT, reassign or delete privileged memberships or use owner_id bootstrap',async()=>{
+ const t=await roleFixture(),staffMember=uuid();await q('insert into auth.users(id) values($1)',[staffMember]);
+ await q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'staff')",[t.r,staffMember]);
+ await asActor({id:t.manager},async()=>{
+  for(const role of ['owner','manager'])await sqlReject(()=>q('insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,$3)',[t.r,t.other,role]),/row-level security/);
+  await sqlReject(()=>q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'owner') on conflict(restaurant_id,user_id) do update set role='owner'",[t.r,t.manager]),/row-level security/);
+  await sqlReject(()=>q("update restaurant_members set role='owner',user_id=$1 where restaurant_id=$2 and user_id=$3",[t.other,t.r,staffMember]),/row-level security/);
+  assert.equal((await q('delete from restaurant_members where restaurant_id=$1 and user_id=$2 returning id',[t.r,t.u])).rows.length,0);
+  assert.equal((await q("update restaurant_members set role='staff' where restaurant_id=$1 and user_id=$2 returning id",[t.r,t.u])).rows.length,0);
+  await sqlReject(()=>q('update restaurants set owner_id=$1 where id=$2',[t.manager,t.r]),/Only an Owner/);
+  await sqlReject(()=>q('delete from restaurants where id=$1',[t.r]),/Only an Owner/);
+  await q("update restaurants set name='Manager edited settings' where id=$1",[t.r]);
+  await q("update restaurant_members set role='waiter' where restaurant_id=$1 and user_id=$2",[t.r,staffMember]);
+ },'aal1');
+ assert.equal((await one('select owner_id from restaurants where id=$1',[t.r])).owner_id,t.u);
+ assert.equal((await one('select role from restaurant_members where restaurant_id=$1 and user_id=$2',[t.r,t.manager])).role,'manager');
+});
+test('HOTFIX authenticated Owner onboarding, membership management and ownership changes remain valid',async()=>{
+ const owner=uuid(),member=uuid(),r=uuid();await q('insert into auth.users(id) values($1),($2)',[owner,member]);
+ await asActor({id:owner},async()=>{
+  await q("insert into restaurants(id,owner_id,name,slug) values($1::uuid,$2::uuid,'Onboarding',$3::text)",[r,owner,r]);
+  await q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'owner')",[r,owner]);
+  await q("insert into branches(restaurant_id,name,slug) values($1,'Main','main')",[r]);
+  await q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'manager')",[r,member]);
+  await q("update restaurant_members set role='owner' where restaurant_id=$1 and user_id=$2",[r,member]);
+  assert.equal((await one('select role from restaurant_members where restaurant_id=$1 and user_id=$2',[r,member])).role,'owner');
+  await q('update restaurants set owner_id=$1 where id=$2',[member,r]);
+  await q('delete from restaurant_members where restaurant_id=$1 and user_id=$2',[r,member]);
+ },'aal1');
+ assert.equal((await one('select owner_id from restaurants where id=$1',[r])).owner_id,member);
+});
+test('HOTFIX staff Manager-link path blocked, ordinary Manager staff operations and Owner permissions preserved',async()=>{
+ const t=await roleFixture(),ordinary=uuid(),managerStaff=uuid();
+ await q("insert into staff(id,restaurant_id,name,role,pin_hash,manager_user_id) values($1,$2,'Manager','manager','disabled',$3)",[managerStaff,t.r,t.manager]);
+ await asActor({id:t.manager},async()=>{
+  await q("insert into staff(id,restaurant_id,name,role,pin_hash) values($1,$2,'Operational','staff','fixture')",[ordinary,t.r]);
+  await q("update staff set name='Updated' where id=$1",[ordinary]);
+  assert.equal((await q('select id from staff where id=$1',[managerStaff])).rows.length,1,'Manager directory read preserved');
+  for(const role of ['owner','manager'])await sqlReject(()=>q('update staff set role=$1 where id=$2',[role,ordinary]),/row-level security/);
+  await sqlReject(()=>q('update staff set manager_user_id=$1 where id=$2',[t.other,ordinary]),/row-level security/);
+  assert.equal((await q("update staff set role='staff',manager_user_id=null where id=$1 returning id",[managerStaff])).rows.length,0);
+  assert.equal((await q('delete from staff where id=$1 returning id',[managerStaff])).rows.length,0);
+  await q('delete from staff where id=$1',[ordinary]);
+ },'aal1');
+ await asActor({id:t.u},async()=>{
+  await q("update staff set name='Owner managed' where id=$1",[managerStaff]);
+  await q('delete from staff where id=$1',[managerStaff]);
+ },'aal1');
+ // Existing trusted server management is unchanged for normal Manager actions.
+ await q("select manage_staff($1,$2,'add',null,'Regular',null,'fixture','staff',null)",[t.manager,t.r]);
+ await sqlReject(()=>q("select manage_staff($1,$2,'add',null,'Privileged',null,null,'manager','any@example.invalid')",[t.manager,t.r]),/Only the owner/);
+});
+test('HOTFIX cross-tenant and unprovisioned principals cannot change membership or ownership; private trigger inaccessible',async()=>{
+ const a=await roleFixture(),b=await roleFixture();
+ for(const actor of [a.u,a.manager,a.other])await asActor({id:actor},async()=>{
+  assert.equal((await q("update restaurant_members set role='owner' where restaurant_id=$1 returning id",[b.r])).rows.length,0);
+  await sqlReject(()=>q("insert into restaurant_members(restaurant_id,user_id,role) values($1,$2,'owner')",[b.r,a.other]),/row-level security/);
+  assert.equal((await q('update restaurants set owner_id=$1 where id=$2 returning id',[actor,b.r])).rows.length,0);
+ },'aal1');
+ assert.equal((await one("select has_function_privilege('anon','is_restaurant_owner(uuid)','execute') ok")).ok,false);
+ assert.equal((await one("select has_schema_privilege('authenticated','platform_private','usage') ok")).ok,false);
 });
