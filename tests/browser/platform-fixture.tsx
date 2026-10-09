@@ -1,3 +1,5 @@
+import Audit from "../../src/app/platform/audit/page";
+import Controls from "../../src/app/platform/controls/page";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import Overview from "../../src/app/platform/page";
@@ -10,7 +12,7 @@ const root=createRoot(document.getElementById("root")!);
 if(location.pathname==="/error") root.render(<ErrorState retry={()=>root.render(<p>Retry requested</p>)}/>);
 else if(location.pathname==="/loading") root.render(<Loading/>);
 else {
-  const page=location.pathname==="/platform/restaurants"?Directory:location.pathname.startsWith("/platform/restaurants/")?Detail:location.pathname==="/platform/analytics"?Analytics:Overview;
+  const page=location.pathname==="/platform/audit"?Audit:location.pathname==="/platform/controls"?Controls:location.pathname==="/platform/restaurants"?Directory:location.pathname.startsWith("/platform/restaurants/")?Detail:location.pathname==="/platform/analytics"?Analytics:Overview;
   // Browser fixture passes route-specific props to real server page functions;
   // the reporting adapter provides local synthetic data, never hosted access.
   const render=page as unknown as (props:{params:Promise<{restaurantId:string}>;searchParams:Promise<Record<string,string>>})=>Promise<React.ReactNode>;

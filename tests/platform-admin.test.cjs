@@ -11,6 +11,7 @@ function harness() {
       if(id==='@/lib/supabase/server')return {createClient:async()=>client};
       if(id.startsWith('@/lib/'))return load('src/lib/'+id.slice(6)+'.ts');
       if(id.startsWith('@/components/'))return new Proxy({}, {get:(_,k)=>String(k)});
+      if(id==='next/cache')return {revalidatePath:()=>{}};
       if(id==='next/navigation')return {redirect:url=>{throw Error('REDIRECT '+url);}};
       if(id==='@/app/actions/auth')return {signOutOwner:()=>{}};
       return require(id);
@@ -46,7 +47,7 @@ test('platform status API independently guards requests; generic response and no
   h.state.user=null;assert.equal((await route.GET()).status,401);
 });
 test('every legacy admin page and platform landing independently deny direct rendering',async()=>{
-  for(const file of ['src/app/platform/page.tsx','src/app/platform/restaurants/page.tsx','src/app/platform/restaurants/[restaurantId]/page.tsx','src/app/platform/analytics/page.tsx',...fs.readdirSync(path.join(__dirname,'../src/app/admin'),{recursive:true}).filter(x=>x.endsWith('page.tsx')).map(x=>'src/app/admin/'+x)]) {
+  for(const file of ['src/app/platform/page.tsx','src/app/platform/restaurants/page.tsx','src/app/platform/restaurants/[restaurantId]/page.tsx','src/app/platform/analytics/page.tsx','src/app/platform/audit/page.tsx','src/app/platform/controls/page.tsx',...fs.readdirSync(path.join(__dirname,'../src/app/admin'),{recursive:true}).filter(x=>x.endsWith('page.tsx')).map(x=>'src/app/admin/'+x)]) {
     const h=harness();h.state.outcome='denied';await assert.rejects(h.load(file).default({searchParams:Promise.resolve({}),params:Promise.resolve({restaurantId:'00000000-0000-0000-0000-000000000000'})}),/access-denied/);
   }
 });
@@ -67,4 +68,14 @@ test('3.5.2 query options preserve bounded filters and pagination links',()=>{
  assert.deepEqual(o.reportOptions({days:'90',page:'21',size:'50',filter:'ready',sort:'orders',q:'Latte'}),{days:90,page:21,size:50,search:'Latte',filter:'ready',sort:'orders'});
  assert.equal(o.reportOptions({days:['7','90'],q:'x'.repeat(200)}).search.length,100);
  const url=new URL(o.directoryUrl({days:'7',q:'A & B',size:'50'},2),'https://example.invalid');assert.equal(url.searchParams.get('q'),'A & B');assert.equal(url.searchParams.get('page'),'2');
+});
+test('3.5.3 account mutation and all control reads independently guard, never trust actor metadata',async()=>{
+ const h=harness(),dal=h.load('src/lib/platform-controls.ts'),action=h.load('src/app/actions/platform-controls.ts');
+ h.state.outcome='denied';
+ for(const f of [()=>dal.getRestaurantControl('foreign'),()=>dal.getControlsSummary(),()=>dal.getAudit({}),()=>action.changeRestaurantAccount({restaurantId:'foreign',actor:'forged'})])await assert.rejects(f(),/access-denied/);
+ assert.equal(h.state.reports.length,0);
+ h.state.outcome='allowed';h.state.reportData={code:'changed'};
+ assert.deepEqual(await action.changeRestaurantAccount({restaurantId:'target',suspend:true,reason:'security_review',confirmed:true,version:0,requestId:'request',actor:'forged'}),{code:'changed'});
+ assert.deepEqual(h.state.reports[0].args,[{p_id:'target',p_suspend:true,p_reason:'security_review',p_confirm:true,p_expected_version:0,p_request:'request'}]);
+ h.state.reportError={message:'secret'};assert.deepEqual(await action.changeRestaurantAccount({}),{code:'unavailable'});
 });

@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { getRestaurantControl } from "@/lib/platform-controls";
+import { AccountControlForm } from "@/components/platform/account-control";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPlatformRestaurant } from "@/lib/platform-reporting";
@@ -7,8 +10,11 @@ export const dynamic="force-dynamic";
 export default async function RestaurantPage({params,searchParams}:PageProps<"/platform/restaurants/[restaurantId]">) {
   const {restaurantId}=await params,search=await searchParams,data=await getPlatformRestaurant(restaurantId,search);
   if(!data) notFound();
-  return <PlatformShell title={data.name}><Link className="underline" href={`/platform/restaurants?days=${reportOptions(search).days}`}>Back to restaurant directory</Link><ReportFilters search={search}/><ReportPeriod period={data}/>
-    <dl className="grid gap-3 rounded border p-4 sm:grid-cols-2">{[["Restaurant ID",data.id],["Slug",data.slug],["Verified owner contact",data.owner_email??"Unavailable"],["Created",utcDate(data.created_at)],["Account status",data.status],["Readiness",data.readiness],["Configured currency","Unavailable — no currency setting"],["Restaurant timezone","Unavailable — reports use UTC"],["Branch configuration",`${data.active_branches} active / ${data.branches} configured`],["Dine-in QR destinations",`${data.dine_in_tables} active tables on active branches`]].map(([k,v])=><div key={k} className="min-w-0"><dt className="text-sm text-muted-foreground">{k}</dt><dd className="break-words">{v}</dd></div>)}</dl>
+  const control=await getRestaurantControl(restaurantId);
+  return <PlatformShell title={data.name}><Link className="underline" href={`/platform/restaurants?days=${reportOptions(search).days}`}>Back to restaurant directory</Link>{control&&<AccountControlForm id={restaurantId} control={control} requestId={randomUUID()}/>}
+    {control&&<p>Historical submitted orders: {control.historical_orders}</p>}
+    <ReportFilters search={search}/><ReportPeriod period={data}/>
+    <dl className="grid gap-3 rounded border p-4 sm:grid-cols-2">{[["Restaurant ID",data.id],["Slug",data.slug],["Verified owner contact",data.owner_email??"Unavailable"],["Created",utcDate(data.created_at)],["Restaurant operating status",data.status],["Readiness",data.readiness],["Configured currency","Unavailable — no currency setting"],["Restaurant timezone","Unavailable — reports use UTC"],["Branch configuration",`${data.active_branches} active / ${data.branches} configured`],["Dine-in QR destinations",`${data.dine_in_tables} active tables on active branches`]].map(([k,v])=><div key={k} className="min-w-0"><dt className="text-sm text-muted-foreground">{k}</dt><dd className="break-words">{v}</dd></div>)}</dl>
     <Metrics items={[["Submitted orders in period",data.orders],["Cancelled orders in period",data.cancelled_orders],["Configured tables",data.tables],["Currently active visits",data.active_visits],["Menu items",data.menu_items],["Available items in own categories",data.available_items],["Menu categories",data.categories],["Configured operational staff",data.staff_accounts]]}/>
     <section className="space-y-2 rounded border p-4"><h2 className="font-semibold">Setup and attention</h2><ul className="list-inside list-disc">
       <li>Restaurant account: created</li><li>Restaurant ordering: {data.status==="active"?"enabled":"not enabled"}</li>

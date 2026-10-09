@@ -5,9 +5,9 @@ import type { Period,Trend } from "@/lib/platform-reporting";
 export function PlatformShell({title,children}:{title:string;children:React.ReactNode}) {
   return <main className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-6 p-4 sm:p-6">
     <nav aria-label="Platform navigation" className="flex flex-wrap items-center gap-4 border-b pb-4">
-      <Link href="/platform">Overview</Link><Link href="/platform/restaurants">Restaurants</Link><Link href="/platform/analytics">Analytics</Link>
+      <Link href="/platform">Overview</Link><Link href="/platform/restaurants">Restaurants</Link><Link href="/platform/analytics">Analytics</Link><Link href="/platform/audit">Audit Logs</Link><Link href="/platform/controls">Platform Controls</Link>
       <form action={signOutOwner}><button className="rounded border px-3 py-2">Sign out</button></form>
-    </nav><header><p className="text-sm text-muted-foreground">THALIQ · Read-only platform administration · MFA required</p><h1 className="break-words text-2xl font-semibold">{title}</h1></header>{children}</main>;
+    </nav><header><p className="text-sm text-muted-foreground">THALIQ · Platform administration · MFA required</p><h1 className="break-words text-2xl font-semibold">{title}</h1></header>{children}</main>;
 }
 export function ReportFilters({search,directory=false}:{search:SearchValues;directory?:boolean}) {
   const o=reportOptions(search);const cls="block w-full rounded border bg-background p-2";

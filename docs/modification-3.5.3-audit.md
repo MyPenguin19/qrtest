@@ -1,0 +1,35 @@
+# 3.5.3 pre-implementation audit
+
+Baseline `c16d3e2891e8b5ae2209ef391b134f1e9d7a8e8c`; clean local `codex/table-operations-3-2`; remote production branch `claude/thaliq-saas-prd-qluyf1`, MyPenguin19/qrtest. Local rollback `rollback/pre-3-5-3` created before application changes. Last verified production deployment `dpl_A6QUCQba3gxLDhY6W1eUEsoAGoox`, alias qrtest-beryl.vercel.app. Supabase target pixhngrbhiziwapxmqjd. Read 3.4, 3.5.1 and 3.5.2 reports/implementation. No production records changed in this audit.
+
+## Current architecture and findings
+Supabase Auth owner/manager identities and separate provisioned platform_admins. platform_admin_status checks live identity, session, expiration, active/unrevoked administrator, JWT/session AAL2 and a verified factor. Reporting RPCs repeat authorization. No generic RLS platform bypass. PIN staff are separate server-validated sessions, never platform identities. Customer signed table tokens and staff actions use existing restricted service-role dining RPCs. Table-session guard/atomic payment logic preserves rounds and closes only after confirmation. Owner direct financial writes are revoked. Owner settings/menu/history remain scoped by membership RLS.
+
+Restaurant status enum active/suspended/closed exists but owners/managers can update it through existing policies. Reusing that field alone for platform suspension would permit self-reactivation and conflate restaurant operation with account control. Add one restricted private account-controls table instead; do not overwrite status, branch hours or readiness. Existing subscription/transaction schema is unused: hosted counts are both zero, no billing provider/backend. Display Billing not configured; do not infer a paid or delinquent subscription.
+
+Platform audit table is RLS-protected, client/service table grants revoked, with UPDATE/DELETE/TRUNCATE rejection triggers. Existing immutable logs cover provisioning/revocation and throttled access denials. Extend fields/event types additively, retain historical rows and protection. Successful control mutation and audit must share a transaction. Denied/failed outcomes return safe codes normally so telemetry commits; unexpected database failure fails closed, never a fabricated success. Audit outage can prevent telemetry and must also prevent mutation.
+
+Hosted Auth schema has mfa_amr_claims(session_id,authentication_method,created_at,updated_at); existing method includes totp. Sensitive actions will require a current session TOTP claim updated within 10 minutes, plus the existing AAL2 guard. Refreshing an access token is not a fresh MFA verification. No Auth tables will be modified by the migration. A trusted operator can recover the sole active platform administrator; do not revoke it for unattended acceptance.
+
+## Safe suspension policy
+Refuse immediate suspension until no open visits, unfinished orders (pending/accepted/preparing/ready), pending receipts or unresolved payable order/bill balances. Served/completed history without payment evidence remains unresolved; ambiguous legacy balances block the control rather than being silently forgiven. Staff can finish work using existing controls while the account remains active, then an administrator explicitly retries. No automatic deferred job, settlement, cancellation or closing.
+
+Use the existing restaurant row as a per-tenant lock: suspension locks FOR UPDATE; insert triggers for new orders/visits/operational requests lock FOR SHARE and check the private account state. This serializes new work against suspension, including direct service-role inserts. Retain historical reads and recovery/configuration. Restoring platform account access never changes operational status/hours. Guard any reopening of a closed visit too. Reactivation and suspension use expected version plus request ID to reject stale opposite actions and deduplicate retries. Server derives actor from auth.uid; no caller role/actor assertion. Reasons are predefined safe classifications (mandatory), not arbitrary potentially secret-bearing payloads.
+
+## Legacy privileged function review
+- handle_new_auth_user: Auth INSERT trigger, no legitimate direct RPC caller. Revoke API-role execute; trigger still works. Empty search path and qualified profiles target.
+- is_restaurant_member / is_restaurant_manager: many public and member RLS policies; anon may evaluate public-read OR predicates. Retain compatible execute, explicit uid check, empty search path and qualified membership table. Return only caller membership boolean.
+- branch_restaurant_id / table_restaurant_id: tenant RLS ownership lookup, not a public directory API. Keep execution for policy compatibility but return IDs only to current members, or trusted service/operator context. Empty search path. Test cross-tenant and legitimate RLS callers.
+- owns_storage_object_restaurant: storage write policies, validate UUID segment and delegate to scoped manager predicate. Retain policy-compatible execute, empty search path; no global access.
+- increment_coupon_usage: already restricted to service-role, not anon/authenticated; leave unchanged.
+Private helpers/new mutation/audit/control reads will have no blanket public grants. New exposed RPCs independently guard requests; no generic privileged API.
+
+## Proposed interface and migration
+Reuse platform shell/DAL; extend detail with separate account state, historical order count, suspension actor/time/reason, safe blockers and confirmed controls. Add paginated/filterable /platform/audit and guarded /platform/controls summary. Extend existing private/no-store response coverage. Minimal generic suspension notices for customer and owner/staff flows, no internal reason disclosure. No visual redesign.
+
+One additive migration: private controls table, audit columns/check expansion/indexes, narrow guarded read/mutation RPCs, database enforcement triggers and reviewed legacy helper hardening. No business data updates, no destructive migration. Test on disposable database before hosted application. Customer/PIN/owner regressions retained.
+
+## Risks, rollback and gates
+Conservative legacy debt detection may block suspension until separately authorized reconciliation; do not invent financial fixes. Shared restaurant locking adds short serialization; test races natively. Readiness, opening status and platform account status remain distinct. Existing legacy status=suspended remains separately visible; new controls do not override it. Recovery requires trusted SQL operator access; no impersonation/deletion/admin provisioning UI.
+
+Leaked-password protection still needs supported project configuration review; do not claim enabled without evidence. Hosted browser restriction remains; do not bypass it. Live suspension requires explicit authorization for an identified controlled tenant, not inferred from permission to implement. Roll back app to baseline while retaining new safety enforcement and logs; never drop audit/history or auto-reactivate tenants as rollback. Exact targets/checks must be reverified before production release.

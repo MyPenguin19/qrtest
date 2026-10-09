@@ -5,7 +5,7 @@ import { reportOptions, type SearchValues } from "@/lib/platform-report-options"
 
 export type Trend = {day:string;signups:number;orders:number;active_restaurants:number;total_restaurants:number};
 export type RestaurantFact = {
-  id:string;name:string;slug:string;owner_email:string|null;created_at:string;status:string;
+  account_status:string;id:string;name:string;slug:string;owner_email:string|null;created_at:string;status:string;
   branches:number;active_branches:number;tables:number;dine_in_tables:number;categories:number;
   menu_items:number;available_items:number;staff_accounts:number;orders:number;cancelled_orders:number;
   qualifying_orders:number;previous_orders:number;first_order:string|null;last_order:string|null;

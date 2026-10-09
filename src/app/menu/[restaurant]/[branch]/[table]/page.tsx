@@ -1,3 +1,4 @@
+import { accountAvailable } from "@/lib/account-availability";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
@@ -22,6 +23,7 @@ export default async function TableMenuPage(
     return <div className="p-6"><h1>Thank you</h1><p>Your table session has ended.</p></div>;
   const data = await getMenuData(restaurant, branch);
   if (!data) notFound();
+  if (!await accountAvailable(data.restaurant.id)) return <p className="p-6">Ordering is temporarily unavailable. Please contact restaurant staff.</p>;
   const table = await resolveTable(data.branch.id, tableId);
   if (!table) notFound();
   if (token === undefined) return <JoinTable restaurant={restaurant} branch={branch} table={tableId} />;

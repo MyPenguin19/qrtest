@@ -1,3 +1,4 @@
+import { AccountNotice } from "@/components/account-notice";
 import Link from "next/link";
 
 import { SidebarNav } from "@/components/dashboard/sidebar-nav";
@@ -27,7 +28,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
           </form>
         </div>
       </aside>
-      <main className="flex-1 p-6">{children}</main>
+      <main className="flex-1 p-6"><AccountNotice restaurantId={restaurant.restaurantId}/>{children}</main>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { AccountNotice } from "@/components/account-notice";
 import { StaffOperationNotice } from "@/components/staff/staff-operation-notice";
 import { ACTIONABLE_ORDER_STATUSES, unassociatedOrderKind } from "@/lib/operations-view";
 import { readAllRows } from "@/lib/query-pages";
@@ -50,7 +51,7 @@ export default async function StaffOrdersPage() {
 
   return (
     <div className="flex min-h-screen flex-col gap-6 bg-muted/20 p-6">
-      <AutoRefresh intervalMs={3000} /><StaffActivity/><StaffOperationNotice/>
+      <AccountNotice restaurantId={session.restaurantId}/><AutoRefresh intervalMs={3000} /><StaffActivity/><StaffOperationNotice/>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Staff Console</h1>
