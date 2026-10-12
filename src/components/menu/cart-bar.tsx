@@ -10,21 +10,21 @@ export function CartBar() {
   const { itemCount, subtotal } = useCart();
   const [open, setOpen] = useState(false);
 
-  if (itemCount === 0) return null;
 
   return (
     <>
-      <div className="fixed inset-x-0 bottom-0 z-40 mx-auto max-w-xl p-4">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{itemCount > 0 ? `Your unsubmitted cart contains ${itemCount} ${itemCount === 1 ? "item" : "items"}. Subtotal ₹${subtotal}.` : "Your cart is empty."}</p>
+      {itemCount > 0 && <div className="fixed inset-x-0 bottom-0 z-40 mx-auto max-w-xl bg-background/95 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
         <Button
           onClick={() => setOpen(true)}
-          className="flex w-full items-center justify-between px-4 py-6 text-base shadow-lg"
+          className="flex min-h-12 w-full flex-wrap items-center justify-between gap-2 whitespace-normal px-4 py-3 text-base shadow-lg"
         >
           <span>
             {itemCount} item{itemCount > 1 ? "s" : ""}
           </span>
           <span>View cart · ₹{subtotal}</span>
         </Button>
-      </div>
+      </div>}
       <CartSheet open={open} onOpenChange={setOpen} />
     </>
   );
